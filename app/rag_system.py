@@ -1,15 +1,16 @@
 import os
 from typing import List, Optional, Dict, Any
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import Chroma
-from langchain.llms import OpenAI
-from langchain.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
 from langchain.chains import RetrievalQA
 from langchain.schema import Document
 from langchain.prompts import PromptTemplate
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
+from langchain_ollama import OllamaLLM
 from PyPDF2 import PdfReader
 from dotenv import load_dotenv
+from config import logger
 
 load_dotenv()
 
@@ -19,14 +20,14 @@ class RAGSystem:
     - HuggingFace embeddings
     - Recursive character text splitting
     - Chroma vector database
-    - GPT-4o for generation
+    - Ollama for generation
     """
     
     def __init__(
         self,
         persist_directory: str = "./chroma_db",
         collection_name: str = "rag_documents",
-        openai_api_key: Optional[str] = None,
+        model_name: str = "Ollama",
         embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
         chunk_size: int = 1000,
         chunk_overlap: int = 200,
@@ -38,21 +39,30 @@ class RAGSystem:
         Args:
             persist_directory: Directory to persist Chroma database
             collection_name: Name for the Chroma collection
+            ollama_model: Ollama model name (e.g., 'llama2', 'mistral', 'codellama')
+            ollama_base_url: Base URL for Ollama server
             openai_api_key: OpenAI API key for GPT-4o
             embedding_model_name: HuggingFace embedding model name
             chunk_size: Size of text chunks for splitting
             chunk_overlap: Overlap between chunks
-            temperature: Temperature for GPT-4o generation
+            temperature: Temperature for Ollama generation
         """
         self.persist_directory = persist_directory
         self.collection_name = collection_name
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        
-        # Set API keys
-        if openai_api_key:
-            os.environ["OPENAI_API_KEY"] = openai_api_key
-        
+
+        logger.info(f"Initializing RAG system with model: {model_name}, collection: {collection_name}")
+        logger.info(f"Using embedding model: {embedding_model_name}, chunk size: {chunk_size}, chunk overlap: {chunk_overlap}")
+        logger.info(f"Persist directory: {self.persist_directory}")
+
+        if model_name.lower() == "ollama":
+            self.ollama_model = os.getenv("OLLAMA_MODEL")
+            self.ollama_base_url = os.getenv("OLLAMA_BASE_URL")
+            self.ollama_api_key = os.getenv("OLLAMA_API_KEY")
+        elif model_name.lower() == "openai":
+            self.openai_api_key = os.getenv("OPENAI_API_KEY")
+
         # Initialize text splitter
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
@@ -73,24 +83,43 @@ class RAGSystem:
             persist_directory=self.persist_directory
         )
         
-        # Initialize GPT-4o
-        self.llm = ChatOpenAI(
-            model_name="gpt-4o",
-            temperature=temperature
-        )
+        if model_name.lower() == "ollama":
+            # Initialize Ollama
+            self.llm = OllamaLLM(
+                model=self.ollama_model,
+                base_url=self.ollama_base_url,
+                seed=42,  # Optional seed for reproducibility
+                api_key=self.ollama_api_key,
+                temperature=temperature
+            )
+        elif model_name.lower() == "openai":
+            # Initialize GPT-4o
+            self.llm = ChatOpenAI(
+                model_name="gpt-4o",
+                temperature=temperature,
+                openai_api_key=self.openai_api_key
+            )
+        else:
+            raise ValueError(f"Unsupported model name: {model_name}. Use 'Ollama' or 'OpenAI'.")
+
         
         # Initialize retrieval chain
-        self.qa_chain = None
+        #self.qa_chain = None
+        self._setup_qa_chain()
+        logger.info("RAG system initialized successfully")
         
     def _setup_qa_chain(self):
         """Setup the retrieval QA chain."""
         if len(self.vector_store.get()['documents']) == 0:
-            print("Vector store is empty. Add documents first.")
+            logger.warning("Vector store is empty. Add documents first.")
             return
         
         # Create custom prompt template
         template = """Use the following pieces of context to answer the question at the end. 
         If you don't know the answer, just say that you don't know, don't try to make up an answer.
+
+        The context provided is about Max Fink's work and may include references to his personal experiences or opinions.
+        The context may contain references to "I", which will almost always refer to "Max Fink"
 
         Context:
         {context}
@@ -113,7 +142,7 @@ class RAGSystem:
             return_source_documents=True
         )
         
-        print("QA chain initialized")
+        logger.info("QA chain initialized")
     
     def add_documents(self, documents: List[str], sources: Optional[List[str]] = None) -> None:
         """
@@ -123,6 +152,7 @@ class RAGSystem:
             documents: List of document texts
             sources: Optional list of source identifiers for each document
         """
+        logger.info(f"Adding {len(documents)} documents to the vector store")
         if sources is None:
             sources = [f"doc_{i}" for i in range(len(documents))]
         
@@ -151,11 +181,12 @@ class RAGSystem:
         self.vector_store.add_documents(doc_objects)
         
         # Persistence is automatic in Chroma >=0.4.x; no manual persist needed
-        
-        print(f"Added {len(all_chunks)} chunks from {len(documents)} documents")
-        
+
+        logger.info(f"Added {len(all_chunks)} chunks from {len(documents)} documents")
+
         # Setup QA chain after adding documents
         self._setup_qa_chain()
+        logger.info(f"Added {len(documents)} documents to the vector store and initialized QA chain")
     
     def add_documents_from_files(self, file_paths: List[str]) -> None:
         """
@@ -164,7 +195,7 @@ class RAGSystem:
         Args:
             file_paths: List of paths to text or PDF files
         """
-
+        logger.info(f"Adding documents from {len(file_paths)} files")
         documents = []
         sources = []
 
@@ -180,18 +211,19 @@ class RAGSystem:
                         documents.append(content)
                         sources.append(file_path)
                     except Exception as e:
-                        print(f"Error reading PDF file {file_path}: {e}")
+                        logger.error(f"Error reading PDF file {file_path}: {e}")
                 else:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
                     documents.append(content)
                     sources.append(file_path)
             except Exception as e:
-                print(f"Error reading file {file_path}: {e}")
+                logger.error(f"Error reading file {file_path}: {e}")
 
         if documents:
             self.add_documents(documents, sources)
-    
+            logger.info(f"Added documents from {len(file_paths)} files")
+
     def query(self, question: str, return_sources: bool = True) -> Dict[str, Any]:
         """
         Query the RAG system.
@@ -203,6 +235,7 @@ class RAGSystem:
         Returns:
             Dictionary containing answer and optionally source documents
         """
+        logger.info(f"Querying RAG system with question: {question}")
         if self.qa_chain is None:
             return {"error": "QA chain not initialized. Add documents first."}
         
@@ -220,8 +253,10 @@ class RAGSystem:
                         "metadata": doc.metadata
                     })
                 response["sources"] = sources
+            logger.info(f"Query successful, found {len(response.get('sources', []))} sources")
             return response
         except Exception as e:
+            logger.error(f"Error during query: {str(e)}")
             return {"error": f"Error during query: {str(e)}"}
     
     def similarity_search(self, query: str, k: int = 4) -> List[Dict[str, Any]]:
@@ -251,7 +286,7 @@ class RAGSystem:
             return results
             
         except Exception as e:
-            print(f"Error during similarity search: {e}")
+            logger.error(f"Error during similarity search: {e}")
             return []
     
     def delete_collection(self):
@@ -264,11 +299,11 @@ class RAGSystem:
                 embedding_function=self.embeddings,
                 persist_directory=self.persist_directory
             )
-            print(f"Deleted Chroma collection: {self.collection_name}")
+            logger.info(f"Deleted Chroma collection: {self.collection_name}")
             self.qa_chain = None
         except Exception as e:
-            print(f"Error deleting collection: {e}")
-    
+            logger.error(f"Error deleting collection: {e}")
+
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about the RAG system."""
         stats = {
@@ -302,13 +337,13 @@ class RAGSystem:
             collection_data = self.vector_store.get()
             ids_to_delete = [doc_id_str for doc_id_str, metadata in zip(collection_data['ids'], collection_data['metadatas']) if metadata.get('doc_id') == doc_id]
             if not ids_to_delete:
-                print(f"No document found with doc_id={doc_id}")
+                logger.warning(f"No document found with doc_id={doc_id}")
                 return False
             self.vector_store.delete(ids_to_delete)
-            print(f"Deleted document with doc_id={doc_id}")
+            logger.info(f"Deleted document with doc_id={doc_id}")
             return True
         except Exception as e:
-            print(f"Error deleting document with doc_id={doc_id}: {e}")
+            logger.error(f"Error deleting document with doc_id={doc_id}: {e}")
             return False
         
     def get_document(self, doc_id: int) -> Optional[Dict[str, Any]]:
@@ -330,10 +365,10 @@ class RAGSystem:
                         "content": doc,
                         "metadata": metadata
                     }
-            print(f"No document found with doc_id={doc_id}")
+            logger.warning(f"No document found with doc_id={doc_id}")
             return None
         except Exception as e:
-            print(f"Error retrieving document with doc_id={doc_id}: {e}")
+            logger.error(f"Error retrieving document with doc_id={doc_id}: {e}")
             return None
         
     def get_all_documents(self) -> List[Dict[str, Any]]:
@@ -353,33 +388,33 @@ class RAGSystem:
                 })
             return all_docs
         except Exception as e:
-            print(f"Error retrieving all documents: {e}")
+            logger.error(f"Error retrieving all documents: {e}")
             return []
 
 
 # Example usage
-if __name__ == "__main__":
-    # Initialize RAG system
-    rag = RAGSystem(
-        persist_directory="./chroma_db",
-        collection_name="my_documents",
-        openai_api_key=os.getenv("OPENAI_API_KEY"),
-        embedding_model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
+# if __name__ == "__main__":
+#     # Initialize RAG system
+#     rag = RAGSystem(
+#         persist_directory="./chroma_db",
+#         collection_name="my_documents",
+#         model_name="OpenAI",
+#         embedding_model_name="sentence-transformers/all-MiniLM-L6-v2"
+#     )
     
-    # Add sample documents
-    documents = [
-        "Machine learning is a subset of artificial intelligence that focuses on algorithms that can learn from data.",
-        "Deep learning uses neural networks with multiple layers to model and understand complex patterns.",
-        "Natural language processing enables computers to understand and generate human language."
-    ]
+#     # Add sample documents
+#     documents = [
+#         "Machine learning is a subset of artificial intelligence that focuses on algorithms that can learn from data.",
+#         "Deep learning uses neural networks with multiple layers to model and understand complex patterns.",
+#         "Natural language processing enables computers to understand and generate human language."
+#     ]
     
-    rag.add_documents(documents, sources=["ml_doc", "dl_doc", "nlp_doc"])
+#     rag.add_documents(documents, sources=["ml_doc", "dl_doc", "nlp_doc"])
     
-    # Query the system
-    response = rag.query("What is machine learning?")
-    print("Answer:", response)
+#     # Query the system
+#     response = rag.query("What is machine learning?")
+#     print("Answer:", response)
     
-    # Get system statistics
-    stats = rag.get_stats()
-    print("System stats:", stats)
+#     # Get system statistics
+#     stats = rag.get_stats()
+#     print("System stats:", stats)

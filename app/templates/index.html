@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Chat Interface</title>
+    <!-- <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}"> -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/chat_interface.css') }}">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body>
+    <header class="banner-header">
+        <img src="{{ url_for('static', filename='images/d916f8ee7b727030e25d4ec536e7b187.jpg') }}" alt="Banner" class="banner-image">
+        <div id="site-title"><a href="https://exhibits.library.stonybrook.edu/mfp">
+            <img src="https://exhibits.library.stonybrook.edu/mfp/files/theme_uploads/3e26e9e9aed298e449ad72559c0750ef.jpg" alt="Max Fink Digital Collection"></a>
+        </div>
+    </header>
+    <div class="chat-container">
+        <div id="loadingOverlay" class="loading-overlay" style="display:none;">
+            <div class="spinner"></div>
+        </div>
+        <div id="chatMessages" class="chat-messages" style="display: none;"></div>
+        <form id="queryForm" class="chat-form">
+            <input type="text" id="questionInput" name="question" placeholder="Type your question..." autocomplete="off" required>
+            <button type="submit" id="sendBtn" class="btn btn-primary"><i class="fas fa-paper-plane"></i></button>
+        </form>
+    </div>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

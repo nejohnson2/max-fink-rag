@@ -1,0 +1,25 @@
+<!-- templates/view_document.html -->
+{% extends "base.html" %}
+
+{% block title %}{{ document.metadata.source or 'Untitled' }} - View Document{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+    <h1>{{ document.metadata.source or 'Untitled Document' }}</h1>
+    <div>
+        <a href="{{ url_for('home') }}" class="btn btn-secondary">Back to All Documents</a>
+    </div>
+</div>
+
+<div class="document-meta" style="margin-bottom: 20px; padding: 12px; background: #f8f9fa; border-radius: 4px;">
+    <strong>Document ID:</strong> {{ document.metadata.doc_id }}<br>
+    {% if document.created_at %}<strong>Created:</strong> {{ document.created_at }}<br>{% endif %}
+    {% if document.updated_at %}<strong>Last Updated:</strong> {{ document.updated_at }}{% endif %}
+</div>
+
+<div style="white-space: pre-wrap; line-height: 1.6; font-size: 16px; border: 1px solid #ddd; padding: 20px; border-radius: 4px; background: #fafafa;">
+{{ document.content or 'No content available.' }}
+</div>
+
+
+{% endblock %}

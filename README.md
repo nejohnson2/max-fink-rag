@@ -27,13 +27,13 @@ It is recommended to use a virtual environment:
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install dotenv langchain langchain_community sentence-transformers PyPDF2 chromadb
+#pip install -r requirements.txt
 ```
 
 #### Example `requirements.txt`
 ```
 langchain
-weaviate-client
 sentence-transformers
 openai
 PyPDF2
