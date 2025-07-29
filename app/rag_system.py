@@ -9,10 +9,12 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaLLM
 from PyPDF2 import PdfReader
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 from config import logger
+from remote_ollama import RemoteOllamaLLM
+from config import OLLAMA_MODEL, OLLAMA_URL, OLLAMA_API_KEY
 
-load_dotenv()
+#load_dotenv()
 
 class RAGSystem:
     """
@@ -57,9 +59,13 @@ class RAGSystem:
         logger.info(f"Persist directory: {self.persist_directory}")
 
         if model_name.lower() == "ollama":
-            self.ollama_model = os.getenv("OLLAMA_MODEL")
-            self.ollama_base_url = os.getenv("OLLAMA_BASE_URL")
-            self.ollama_api_key = os.getenv("OLLAMA_API_KEY")
+            self.ollama_model = OLLAMA_MODEL
+            self.ollama_base_url = OLLAMA_URL
+            self.ollama_api_key = OLLAMA_API_KEY
+        elif model_name.lower() == "remote_ollama":
+            self.ollama_model = OLLAMA_MODEL
+            self.ollama_base_url = OLLAMA_URL
+            self.ollama_api_key = OLLAMA_API_KEY
         elif model_name.lower() == "openai":
             self.openai_api_key = os.getenv("OPENAI_API_KEY")
 
@@ -91,6 +97,14 @@ class RAGSystem:
                 seed=42,  # Optional seed for reproducibility
                 api_key=self.ollama_api_key,
                 temperature=temperature
+            )
+        elif model_name.lower() == "remote_ollama":
+            logger.info("Using Remote Ollama model")
+            logger.info(f"Connecting to Remote Ollama at {self.ollama_base_url} with model {self.ollama_model}")
+            self.llm = RemoteOllamaLLM(
+                model=self.ollama_model,
+                base_url=self.ollama_base_url,
+                headers={"Authorization": f"Bearer {self.ollama_api_key}"}
             )
         elif model_name.lower() == "openai":
             # Initialize GPT-4o

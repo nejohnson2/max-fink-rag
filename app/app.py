@@ -219,7 +219,7 @@ if __name__ == '__main__':
     rag = RAGSystem(
         persist_directory="./chroma_db",
         collection_name="my_documents",
-        model_name="OpenAI",
+        model_name="Remote_Ollama",  # examples include "Ollama", "Remote_Ollama", "OpenAI"
         embedding_model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
