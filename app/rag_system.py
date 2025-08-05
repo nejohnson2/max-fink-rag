@@ -9,12 +9,9 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaLLM
 from PyPDF2 import PdfReader
-#from dotenv import load_dotenv
 from config import logger
 from remote_ollama import RemoteOllamaLLM
 from config import OLLAMA_MODEL, OLLAMA_URL, OLLAMA_API_KEY
-
-#load_dotenv()
 
 class RAGSystem:
     """
@@ -133,7 +130,8 @@ class RAGSystem:
         If you don't know the answer, just say that you don't know, don't try to make up an answer.
 
         The context provided is about Max Fink's work and may include references to his personal experiences or opinions.
-        The context may contain references to "I", which will almost always refer to "Max Fink"
+        The context provided may refer to "Dr. Fink" of "Fink".  This is the same person as Max Fink.
+        Do not respond with "I".  Responses should be in the third person.
 
         Context:
         {context}
@@ -405,7 +403,28 @@ class RAGSystem:
             logger.error(f"Error retrieving all documents: {e}")
             return []
 
-
+    def get_chunk(self, doc_id: int, chunk_id: int) -> Optional[Dict[str, Any]]:
+            """
+            Retrieve a specific chunk from a document in the Chroma collection.
+            Args:
+                doc_id: The document ID to retrieve (as stored in metadata)
+                chunk_id: The chunk ID to retrieve
+            Returns:
+                Chunk content and metadata if found, None otherwise
+            """
+            try:
+                collection_data = self.vector_store.get()
+                for doc, metadata in zip(collection_data['documents'], collection_data['metadatas']):
+                    if metadata.get('doc_id') == doc_id and metadata.get('chunk_id') == chunk_id:
+                        return {
+                            "content": doc,
+                            "metadata": metadata
+                        }
+                logger.warning(f"No chunk found with doc_id={doc_id} and chunk_id={chunk_id}")
+                return None
+            except Exception as e:
+                logger.error(f"Error retrieving chunk with doc_id={doc_id}, chunk_id={chunk_id}: {e}")
+                return None
 # Example usage
 # if __name__ == "__main__":
 #     # Initialize RAG system

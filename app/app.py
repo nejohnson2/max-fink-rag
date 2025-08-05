@@ -1,6 +1,6 @@
 # Route to handle PDF uploads and add them to ChromaDB
 from werkzeug.utils import secure_filename
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify,send_from_directory
 import os
 from config import logger
 #from werkzeug.exceptions import NotFound
@@ -10,10 +10,17 @@ from rag_system import RAGSystem
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
+# This works
+PDF_DIR = os.path.join(os.getcwd(), 'uploads')  # Ensure uploads directory exists
+
 @app.route('/')
 def index():
     """Redirect to home page"""
     return render_template('index.html')
+
+@app.route("/pdf/<path:filename>")
+def serve_pdf(filename):
+    return send_from_directory(PDF_DIR, filename)
 
 @app.route('/home')
 def home():
@@ -31,14 +38,30 @@ def view_document(doc_id):
     """View a specific document"""
     try:
         document = rag.get_document(int(doc_id))
+        document_source = os.path.basename(document['metadata']['source'])  # Retrieve the source of the document
 
         if not document:
             logger.error('Document not found')
             return redirect(url_for('home'))
             
-        return render_template('view_document.html', document=document)
+        return render_template('view_document.html', document=document, document_source=document_source)
     except Exception as e:
         logger.error(f'Error loading document: {str(e)}')
+        return redirect(url_for('home'))
+
+@app.route('/document/<doc_id>/<chunk_id>')
+def view_chunk(doc_id, chunk_id):
+    """View a specific chunk of a document"""
+    try:
+        chunk = rag.get_chunk(int(doc_id), int(chunk_id))
+
+        if not chunk:
+            logger.error('Chunk not found')
+            return redirect(url_for('home'))
+
+        return render_template('view_chunk.html', chunk=chunk)
+    except Exception as e:
+        logger.error(f'Error loading chunk: {str(e)}')
         return redirect(url_for('home'))
 
 @app.route('/query', methods=['POST'])
@@ -81,6 +104,7 @@ def upload_pdfs():
 
     saved_paths = []
     upload_folder = os.path.join(os.getcwd(), 'uploads')
+    logger.info(f"Upload folder: {upload_folder}")
     os.makedirs(upload_folder, exist_ok=True)
 
     for file in files:
@@ -218,7 +242,7 @@ if __name__ == '__main__':
     #rag_system = RAGSystem()
     rag = RAGSystem(
         persist_directory="./chroma_db",
-        collection_name="my_documents",
+        collection_name="rag_documents",
         model_name="Remote_Ollama",  # examples include "Ollama", "Remote_Ollama", "OpenAI"
         embedding_model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
