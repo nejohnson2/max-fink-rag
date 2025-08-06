@@ -8,6 +8,7 @@ from config import logger
 from rag_system import RAGSystem
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # Limit upload size to 16MB
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
 # This works
