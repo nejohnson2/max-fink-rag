@@ -40,11 +40,19 @@ def upload_pdfs_from_folder(folder_path):
 
     # Upload PDFs
     rag.add_documents_from_files(pdf_files)
+    
+    # Optionally, you can count the documents in the collection after upload
+    num_docs = rag.vector_store.get(include=['documents'])['ids']
+    logger.info(f"Number of documents in collection after upload: {len(num_docs)}")
     logger.info("Upload complete.")
 
 if __name__ == "__main__":
     import argparse
-
+    logger.info("Starting PDF upload script...")
     parser = argparse.ArgumentParser(description="Upload all PDFs in a folder to the vector database.")
     parser.add_argument("folder", help="Path to the folder containing PDF files")
     args = parser.parse_args()
+
+    upload_pdfs_from_folder(args.folder)
+
+    logger.info("Script execution completed.")
