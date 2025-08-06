@@ -70,7 +70,7 @@ body {
 .chat-messages {
     width: 552px; /* 600px container - 2*24px padding = 552px */
     min-height: 200px;
-    max-height: 500px;
+    max-height: 400px;
     overflow-y: auto;
     margin-bottom: 5px;
     padding: 8px;

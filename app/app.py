@@ -33,6 +33,21 @@ def home():
         logger.error(f"Error loading documents: {str(e)}")
         return render_template('home.html', documents=[])
 
+@app.route('/view_documents')
+def view_documents():
+    """View all documents"""
+    try:
+        upload_folder = os.path.join(os.getcwd(), 'uploads')
+        if not os.path.exists(upload_folder):
+            files = []
+        else:
+            files = [f for f in os.listdir(upload_folder) if os.path.isfile(os.path.join(upload_folder, f))]
+        logger.info(f"Files in upload directory: {files}")
+        return render_template('view_documents.html', files=files)
+    except Exception as e:
+        logger.error(f"Error loading files from uploads: {str(e)}")
+        return render_template('view_documents.html', files=[])
+
 @app.route('/document/<doc_id>')
 def view_document(doc_id):
     """View a specific document"""
