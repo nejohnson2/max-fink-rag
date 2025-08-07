@@ -1,8 +1,10 @@
 import os
 import sys
-sys.path.append('../app')
-from rag_system import RAGSystem
 import logging
+
+sys.path.append('../app')
+
+from rag_system import RAGSystem
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
