@@ -112,11 +112,12 @@ class RAGSystem:
             )
         else:
             raise ValueError(f"Unsupported model name: {model_name}. Use 'Ollama' or 'OpenAI'.")
-
-        
+    
+        # Ensure qa_chain is always defined
+        self.qa_chain = None
         # Initialize retrieval chain
-        #self.qa_chain = None
         self._setup_qa_chain()
+
         logger.info("RAG system initialized successfully")
         
     def _setup_qa_chain(self):
