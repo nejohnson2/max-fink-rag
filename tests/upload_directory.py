@@ -35,9 +35,12 @@ def upload_pdfs_from_folder(folder_path):
         persist_directory="../chroma_db",
         collection_name="rag_documents",
         model_name="Remote_Ollama",  # or "Ollama" or "OpenAI" as appropriate
-        embedding_model_name="sentence-transformers/all-MiniLM-L6-v2"
+        embedding_model_name="BAAI/bge-large-en"
     )
-
+   
+    num_docs = rag.vector_store.get(include=['documents'])['ids']
+    logger.info(f"Number of documents in collection before upload: {len(num_docs)}")
+    
     # Upload PDFs
     rag.add_documents_from_files(pdf_files)
     
