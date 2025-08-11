@@ -9,6 +9,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaLLM
 from PyPDF2 import PdfReader
+import torch
 from config import logger
 from remote_ollama import RemoteOllamaLLM
 from config import OLLAMA_MODEL, OLLAMA_URL, OLLAMA_API_KEY
@@ -50,10 +51,19 @@ class RAGSystem:
         self.collection_name = collection_name
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.device = None
+
+        if torch.cuda.is_available():
+            self.device = "cuda"  # NVIDIA GPU
+        elif torch.backends.mps.is_available():
+            self.device = "mps"   # Apple Silicon GPU
+        else:
+            self.device = "cpu"   # Default: CPU
 
         logger.info(f"Initializing RAG system with model: {model_name}, collection: {collection_name}")
         logger.info(f"Using embedding model: {embedding_model_name}, chunk size: {chunk_size}, chunk overlap: {chunk_overlap}")
         logger.info(f"Persist directory: {self.persist_directory}")
+        logger.info(f"Device set to: {self.device}")
 
         if model_name.lower() == "ollama":
             self.ollama_model = OLLAMA_MODEL
@@ -76,7 +86,7 @@ class RAGSystem:
         # Initialize HuggingFace embeddings
         self.embeddings = HuggingFaceEmbeddings(
             model_name=embedding_model_name,
-            model_kwargs={'device': 'cpu'}  # Change to 'cuda' if GPU available
+            model_kwargs={'device': self.device}  # Change to 'cuda' if GPU available
         )
         
         # Initialize Chroma vector store
@@ -131,7 +141,7 @@ class RAGSystem:
         If you don't know the answer, just say that you don't know, don't try to make up an answer.
 
         The context provided is about Max Fink's work and may include references to his personal experiences or opinions.
-        The context provided may refer to "Dr. Fink" of "Fink".  This is the same person as Max Fink.
+        The context provided may refer to "Dr. Fink" or "Fink".  This is the same person as Max Fink.
         Do not respond with "I".  Responses should be in the third person.
 
         Context:
@@ -150,7 +160,7 @@ class RAGSystem:
         self.qa_chain = RetrievalQA.from_chain_type(
             llm=self.llm,
             chain_type="stuff",
-            retriever=self.vector_store.as_retriever(search_kwargs={"k": 4}),
+            retriever=self.vector_store.as_retriever(search_kwargs={"k": 10}),
             chain_type_kwargs={"prompt": prompt},
             return_source_documents=True
         )
@@ -221,6 +231,8 @@ class RAGSystem:
                         content = ""
                         for page in reader.pages:
                             content += page.extract_text() or ""
+                            if len(content) > 1000000:  # Limit to 1 million characters
+                                logger.warning(f"File {file_path} is too large, truncating content.")
                         documents.append(content)
                         sources.append(file_path)
                     except Exception as e:
@@ -272,35 +284,35 @@ class RAGSystem:
             logger.error(f"Error during query: {str(e)}")
             return {"error": f"Error during query: {str(e)}"}
     
-    def similarity_search(self, query: str, k: int = 4) -> List[Dict[str, Any]]:
-        """
-        Perform similarity search without generation.
+    # def similarity_search(self, query: str, k: int = 4) -> List[Dict[str, Any]]:
+    #     """
+    #     Perform similarity search without generation.
         
-        Args:
-            query: Search query
-            k: Number of results to return
+    #     Args:
+    #         query: Search query
+    #         k: Number of results to return
             
-        Returns:
-            List of similar documents
-        """
-        if self.vector_store is None:
-            return []
+    #     Returns:
+    #         List of similar documents
+    #     """
+    #     if self.vector_store is None:
+    #         return []
         
-        try:
-            docs = self.vector_store.similarity_search(query, k=k)
-            results = []
+    #     try:
+    #         docs = self.vector_store.similarity_search(query, k=k)
+    #         results = []
             
-            for doc in docs:
-                results.append({
-                    "content": doc.page_content,
-                    "metadata": doc.metadata
-                })
+    #         for doc in docs:
+    #             results.append({
+    #                 "content": doc.page_content,
+    #                 "metadata": doc.metadata
+    #             })
             
-            return results
+    #         return results
             
-        except Exception as e:
-            logger.error(f"Error during similarity search: {e}")
-            return []
+    #     except Exception as e:
+    #         logger.error(f"Error during similarity search: {e}")
+    #         return []
     
     def delete_collection(self):
         """Delete the Chroma collection."""
@@ -426,29 +438,3 @@ class RAGSystem:
             except Exception as e:
                 logger.error(f"Error retrieving chunk with doc_id={doc_id}, chunk_id={chunk_id}: {e}")
                 return None
-# Example usage
-# if __name__ == "__main__":
-#     # Initialize RAG system
-#     rag = RAGSystem(
-#         persist_directory="./chroma_db",
-#         collection_name="my_documents",
-#         model_name="OpenAI",
-#         embedding_model_name="sentence-transformers/all-MiniLM-L6-v2"
-#     )
-    
-#     # Add sample documents
-#     documents = [
-#         "Machine learning is a subset of artificial intelligence that focuses on algorithms that can learn from data.",
-#         "Deep learning uses neural networks with multiple layers to model and understand complex patterns.",
-#         "Natural language processing enables computers to understand and generate human language."
-#     ]
-    
-#     rag.add_documents(documents, sources=["ml_doc", "dl_doc", "nlp_doc"])
-    
-#     # Query the system
-#     response = rag.query("What is machine learning?")
-#     print("Answer:", response)
-    
-#     # Get system statistics
-#     stats = rag.get_stats()
-#     print("System stats:", stats)

@@ -3,13 +3,12 @@ from werkzeug.utils import secure_filename
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify,send_from_directory
 import os
 from config import logger
-#from werkzeug.exceptions import NotFound
 
 from rag_system import RAGSystem
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # Limit upload size to 16MB
-app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-here')
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # Limit upload size to 500MB
+#app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
 # This works
 PDF_DIR = os.path.join(os.getcwd(), 'uploads')  # Ensure uploads directory exists
@@ -21,6 +20,7 @@ def index():
 
 @app.route("/pdf/<path:filename>")
 def serve_pdf(filename):
+    """Serve uploaded PDF files"""
     return send_from_directory(PDF_DIR, filename)
 
 @app.route('/home')
@@ -255,12 +255,13 @@ def delete_document(doc_id):
 if __name__ == '__main__':
     logger.info("Starting ChromaDB Document Manager")
     # Initialize RAGSystem (adjust constructor as needed)
-    #rag_system = RAGSystem()
+    
     rag = RAGSystem(
         persist_directory="./chroma_db",
         collection_name="rag_documents",
         model_name="Remote_Ollama",  # examples include "Ollama", "Remote_Ollama", "OpenAI"
-        embedding_model_name="sentence-transformers/all-MiniLM-L6-v2"
+        embedding_model_name="BAAI/bge-large-en"
+        #embedding_model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
     # Run the app
