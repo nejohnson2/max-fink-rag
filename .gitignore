@@ -96,3 +96,4 @@ celerybeat-schedule
 
 # ChromaDB vector store
 chroma_db/
+chroma_rag
