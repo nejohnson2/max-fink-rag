@@ -97,3 +97,7 @@ celerybeat-schedule
 # ChromaDB vector store
 chroma_db/
 chroma_rag
+fink_archive/
+*/rag_store/
+
+.DS_Store
