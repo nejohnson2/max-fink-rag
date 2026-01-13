@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+"""Retrieval-Augmented Generation (RAG) system for the Max Fink archive.
+
+This module wires together:
+- Chroma vector search (semantic retrieval)
+- Optional BM25 keyword search (lexical retrieval)
+- Parent/child document reconstruction (retrieve chunk → return full parent)
+- Multi-query expansion (LLM generates alternative queries)
+- Cross-encoder reranking / contextual compression (select best passages)
+- A chat-style prompt with conversation history
+
+The public entrypoint is `RAGSystem.ask()`, which returns an answer plus source
+metadata suitable for displaying citations/links in the UI.
+"""
+
 import os
 import json
 import sys
@@ -30,7 +44,8 @@ try:
     from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
 except Exception:  # pragma: no cover
     try:
-        from langchain.retrievers.document_compressors import CrossEncoderReranker  # if langchain is installed
+        # Optional fallback if `langchain_classic` isn't present.
+        from langchain.retrievers.document_compressors import CrossEncoderReranker  # type: ignore
     except Exception:  # pragma: no cover
         # Last resort: implement rerank manually (see note below)
         CrossEncoderReranker = None  # type: ignore
@@ -38,27 +53,97 @@ except Exception:  # pragma: no cover
 #from remote_ollama import RemoteOllamaLLM
 #from config import OLLAMA_API_KEY, OLLAMA_MODEL, OLLAMA_URL
 from remote_ollama import RemoteOllamaLLM
-from config import OLLAMA_API_KEY, OLLAMA_MODEL, OLLAMA_URL
+from config import OLLAMA_API_KEY, OLLAMA_MODEL, OLLAMA_URL, logger
 
 class _ParentFromChildRetriever(BaseRetriever):
+    """Retriever adapter that converts child chunk hits into unique parent docs.
+
+    The vector store is typically populated with *child chunks* for recall.
+    The UI/LLM, however, usually benefits from seeing the full *parent document*
+    (or larger sections). This wrapper:
+
+    1) Invokes an underlying `child_retriever`.
+    2) Reads each child's `metadata.parent_id`.
+    3) Looks up the corresponding parent `Document` in `parent_lookup`.
+    4) Optionally filters parents by `collection_filter`.
+
+    If no parents are found, it falls back to returning the original child hits.
+    """
+
     child_retriever: BaseRetriever
     parent_lookup: Dict[str, Document]
+    collection_filter: Optional[List[str]] = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def _get_relevant_documents(self, query: str) -> List[Document]:
-        #child_hits: List[Document] = self.child_retriever.get_relevant_documents(query)
+        # LangChain retrievers have been moving from `.get_relevant_documents()`
+        # to `.invoke()`; we use `.invoke()` for forward compatibility.
         child_hits: List[Document] = self.child_retriever.invoke(query)
         seen = set()
         parents: List[Document] = []
         for d in child_hits:
             pid = (d.metadata or {}).get("parent_id")
             if pid and pid in self.parent_lookup and pid not in seen:
+                parent_doc = self.parent_lookup[pid]
+
+                # Apply collection filter if specified
+                if self.collection_filter:
+                    doc_collection = parent_doc.metadata.get("collection")
+                    if doc_collection not in self.collection_filter:
+                        continue
+
                 seen.add(pid)
-                parents.append(self.parent_lookup[pid])
+                parents.append(parent_doc)
         return parents if parents else child_hits
 
 
+class _MetadataFilterRetriever(BaseRetriever):
+    """Filter retriever results by simple metadata constraints.
+
+    This is used when we intentionally keep results as *child chunks* (e.g.
+    biographical intent) but still want to enforce the same metadata filters
+    that Chroma supports natively.
+
+    Note: This filter is applied *after* the wrapped retriever returns results.
+    It is primarily to keep BM25/ensemble results aligned with vector filters.
+    """
+
+    child_retriever: BaseRetriever
+    allowed_collections: Optional[List[str]] = None
+    doc_type: Optional[str] = None
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def _get_relevant_documents(self, query: str) -> List[Document]:
+        docs: List[Document] = self.child_retriever.invoke(query)
+        if not self.allowed_collections and not self.doc_type:
+            return docs
+
+        filtered: List[Document] = []
+        for d in docs:
+            md = d.metadata or {}
+            if self.allowed_collections:
+                collection = md.get("collection")
+                if collection not in self.allowed_collections:
+                    continue
+            if self.doc_type:
+                if md.get("doc_type") != self.doc_type:
+                    continue
+            filtered.append(d)
+
+        return filtered
+
+
 def _load_parent_lookup(parents_jsonl_path: str) -> Dict[str, Document]:
+    """Load parent documents from a JSONL file into an in-memory lookup.
+
+    Expected JSONL record shape (per line):
+    - parent_id: str
+    - text: str
+    - metadata: dict (optional)
+
+    This enables fast parent reconstruction during retrieval without having to
+    re-query a separate store.
+    """
     lookup: Dict[str, Document] = {}
     if not os.path.exists(parents_jsonl_path):
         return lookup
@@ -79,6 +164,30 @@ def _load_parent_lookup(parents_jsonl_path: str) -> Dict[str, Document]:
 
 
 class RAGSystem:
+    """End-to-end RAG pipeline: retrieval → rerank → prompt → answer.
+
+    Design notes:
+    - Vector retrieval provides semantic recall; optional BM25 helps with exact
+      terms (names, acronyms, citations).
+    - Parent/child reconstruction ensures the LLM sees coherent source text.
+    - Intent classification gates retrieval to relevant archive collections.
+    """
+
+    # Collection filter mapping for intent classification
+    COLLECTION_FILTERS = {
+        "biographical": ["Biographical Files"],
+        "research": ["Published Works", "Research Files and Unpublished Works"],
+        "correspondence": ["Correspondence"]
+    }
+
+    # Parent docs can be extremely large for some collections (e.g. long
+    # biographical PDFs). For those intents, default to sending chunk text.
+    USE_PARENT_DOCUMENTS_BY_INTENT = {
+        "biographical": False,
+        "research": False,
+        "correspondence": True,
+    }
+
     def __init__(
         self,
         #store_dir: str = "./rag_store",
@@ -91,15 +200,20 @@ class RAGSystem:
         k_after_rerank: int = 6,
         enable_bm25: bool = True,
     ):
+        """Initialize embeddings, vectorstore, retrievers, reranker, and LLM."""
         self.store_dir = store_dir
         self.k_recall = k_recall
         self.k_ensemble = k_ensemble
         self.k_after_rerank = k_after_rerank
         self.enable_bm25 = enable_bm25
 
+        # Persisted artifacts live under `store_dir`:
+        # - `chroma/` holds the vector index
+        # - `parents.jsonl` maps parent_id → full parent text/metadata
         chroma_dir = os.path.join(store_dir, "chroma")
         parents_path = os.path.join(store_dir, "parents.jsonl")
 
+        # Sentence-transformer style embeddings used by Chroma similarity search.
         self.embeddings = HuggingFaceEmbeddings(model_name=embeddings_model)
         self.vs = Chroma(
             collection_name=chroma_collection,
@@ -107,13 +221,17 @@ class RAGSystem:
             persist_directory=chroma_dir,
         )
 
+        # Parent documents are stored separately so we can retrieve chunks but
+        # present the larger parent to the model/UI.
         self._parent_lookup = _load_parent_lookup(parents_path)
 
         self.bm25: Optional[BM25Retriever] = None
         if enable_bm25:
+            # BM25 needs the raw documents in-memory.
             self.bm25 = self._build_bm25_from_chroma()
             self.bm25.k = self.k_recall
 
+        # Cross-encoder reranker is used by ContextualCompressionRetriever.
         self.cross_encoder = HuggingFaceCrossEncoder(model_name=reranker_model)
 
         if CrossEncoderReranker is None:
@@ -127,12 +245,17 @@ class RAGSystem:
             top_n=self.k_after_rerank,
         )
 
+        # LLM endpoint used for:
+        # - intent classification
+        # - multi-query expansion
+        # - final answering
         self.llm = RemoteOllamaLLM(
             model=OLLAMA_MODEL,
             base_url=OLLAMA_URL,
             headers={"Authorization": f"Bearer {OLLAMA_API_KEY}"},
         )
 
+        # Prompt: system behavior + conversation history + question+context.
         # self.prompt = ChatPromptTemplate.from_messages(
         #     [
         #         (
@@ -146,11 +269,32 @@ class RAGSystem:
         # )
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", 
-            "You are a knowledgeable archivist assistant specializing in Max Fink's life and work. "
-            "Answer questions using the provided archival documents. "
-            "Be precise, scholarly, and cite specific details from the context. "
-            "If information is not in the documents, say so clearly. "
-            "When discussing dates, events, or people, be specific and reference the source material."),
+             "You are a digital librarian assisting users with a curated archival collection. "
+
+                "Your role is to help users understand, interpret, and navigate the materials,"
+                "not just to provide direct answers."
+
+                "Use only the provided context to respond to the user’s question."
+                "Base your answer on the documents retrieved from the collection."
+
+                "If the context clearly answers the question:"
+                "- Explain the answer in clear, accessible language."
+                "- Briefly indicate what type of document(s) the information comes from"
+                "(for example, correspondence, bibliographic records, or published work)."
+
+                "If the context does not fully answer the question:"
+                "- Say what can and cannot be determined from the available materials."
+                "- Suggest what kinds of documents or information might help answer it."
+
+                "Do not speculate or introduce information that is not supported by the context."
+                "It is acceptable and encouraged to say “I don’t know” when appropriate."
+                "Write in a neutral, professional tone suitable for a library reference interaction."
+            # "You are a knowledgeable archivist assistant specializing in Max Fink's life and work. "
+            # "Answer questions using the provided archival documents. "
+            # "Be precise, scholarly, and cite specific details from the context. "
+            # "If information is not in the documents, say so clearly. "
+            # "When discussing dates, events, or people, be specific and reference the source material."),
+            ),
             MessagesPlaceholder("history"),
             ("human", "Question: {question}\n\nArchival Context:\n{context}"),
         ])
@@ -159,6 +303,7 @@ class RAGSystem:
         self._answer_chain = self.prompt | self.llm | StrOutputParser()
 
     def _build_bm25_from_chroma(self) -> BM25Retriever:
+        """Build a BM25 retriever from whatever is currently stored in Chroma."""
         col = self.vs._collection
         data = col.get(include=["documents", "metadatas"])
         docs: List[Document] = []
@@ -166,23 +311,76 @@ class RAGSystem:
             docs.append(Document(page_content=text, metadata=md or {}))
         return BM25Retriever.from_documents(docs)
 
+    def classify_intent(self, question: str) -> str:
+        """Classify user question intent into biographical, research, or correspondence."""
+
+        classification_prompt = f"""Classify the following question about Max Fink into ONE of these categories:
+- biographical: Questions about Max Fink's life, background, education, career, personal history
+- research: Questions about his scientific work, publications, studies, findings, theories
+- correspondence: Questions about letters, communications, exchanges with colleagues
+
+Question: {question}
+
+Respond with ONLY ONE WORD: biographical, research, or correspondence"""
+
+        try:
+            intent = self.llm.invoke(classification_prompt).strip().lower()
+
+            # Validate and default to research if unclear
+            if intent not in ["biographical", "research", "correspondence"]:
+                logger.warning(f"Unclear intent classification: {intent}, defaulting to research")
+                intent = "research"
+
+            logger.info(f"Classified intent as: {intent}")
+            return intent
+        except Exception as e:
+            logger.error(f"Intent classification failed: {e}, defaulting to research")
+            return "research"  # Default fallback
+
     def ask(
         self,
         question: str,
         chat_session_id: str = "default",
         *,
         doc_type: Optional[str] = None,
-    ) -> str:
+    ) -> Dict[str, object]:
+        """Answer a question using RAG and return answer + source metadata.
+
+        Returns a dict of:
+        - answer: str
+        - sources: list[dict] with parent_id/title/collection/source URL
+
+        `doc_type` is an additional metadata filter layered on top of the
+        intent-based collection filter.
+        """
+
+        # Step 1: Classify intent to determine which collections are eligible.
+        intent = self.classify_intent(question)
+        allowed_collections = self.COLLECTION_FILTERS[intent]
+
+        # Step 2: Build vector search kwargs with a metadata filter.
         search_kwargs: Dict[str, object] = {"k": self.k_recall}
+
+        # Apply collection filter based on intent
+        search_kwargs["filter"] = {
+            "collection": {"$in": allowed_collections}
+        }
+
+        # If doc_type is also specified, combine filters
         if doc_type:
-            search_kwargs["filter"] = {"doc_type": doc_type}
+            search_kwargs["filter"]["doc_type"] = doc_type
 
         vec_ret = self.vs.as_retriever(
             search_type="similarity",
             search_kwargs=search_kwargs,
         )
 
-        if self.enable_bm25 and self.bm25 is not None and not doc_type:
+        use_parent_documents = self.USE_PARENT_DOCUMENTS_BY_INTENT.get(intent, True)
+
+        # Note: BM25 doesn't support metadata filtering.
+        # We still include BM25 for recall, but apply the collection filter after
+        # parent reconstruction (in `_ParentFromChildRetriever`).
+        if self.enable_bm25 and self.bm25 is not None:
             ensemble_child: BaseRetriever = EnsembleRetriever(
                 retrievers=[vec_ret, self.bm25],
                 weights=[0.5, 0.5],
@@ -190,13 +388,26 @@ class RAGSystem:
         else:
             ensemble_child = vec_ret
 
-        parent_ret: BaseRetriever = _ParentFromChildRetriever(
-            child_retriever=ensemble_child,
-            parent_lookup=self._parent_lookup,
-        )
+        # When parent documents are huge (common for biographical PDFs), we keep
+        # results as child chunks to avoid sending 70+ pages to the LLM.
+        # Otherwise, we reconstruct the parent documents for more coherent context.
+        if use_parent_documents:
+            base_ret: BaseRetriever = _ParentFromChildRetriever(
+                child_retriever=ensemble_child,
+                parent_lookup=self._parent_lookup,
+                collection_filter=allowed_collections,
+            )
+        else:
+            # Still enforce collection/doc_type filters even though BM25 doesn't
+            # support them natively.
+            base_ret = _MetadataFilterRetriever(
+                child_retriever=ensemble_child,
+                allowed_collections=allowed_collections,
+                doc_type=doc_type,
+            )
 
         expanded_ret: BaseRetriever = MultiQueryRetriever.from_llm(
-            retriever=parent_ret,
+            retriever=base_ret,
             llm=self.llm,
             include_original=True,
         )
@@ -206,20 +417,26 @@ class RAGSystem:
             base_compressor=self.compressor,
         )
 
-        #contexts = compression_ret.get_relevant_documents(question)
+        # Retrieval pipeline output is a list of Documents ranked by relevance.
         contexts = compression_ret.invoke(question)
         
-        # Build context text for the LLM
+        # Build context text for the LLM. Even though the compressor already
+        # returns `top_n`, we defensively slice.
         top_docs = contexts[: self.k_after_rerank]
+        logger.info(f"Retrieved {len(top_docs)} top documents for context.")
         context_text = "\n\n---\n\n".join(d.page_content for d in top_docs)
+        logger.info(f"Context text built with {len(top_docs)} documents.")
+        logger.info(f"Context text: {context_text}")
 
-        # Build a lightweight metadata list to return
+        # Build a lightweight metadata list for UI citations.
+        # (The UI expects a URL when possible; we derive it from known metadata.)
         sources = []
         base_url = "https://exhibits.library.stonybrook.edu/mfp/files/original/"
 
         for d in top_docs:
             md = d.metadata or {}
-            # Build URL from base_url and pdf_filename
+            # Prefer a stable file URL constructed from `pdf_filename`/`filename`.
+            # Fall back to whatever source-like fields exist.
             pdf_filename = md.get("pdf_filename") or md.get("filename")
             source_url = base_url + pdf_filename if pdf_filename else (md.get("item_url") or md.get("Source") or md.get("source"))
 
@@ -233,6 +450,7 @@ class RAGSystem:
             )
 
         def _get_history(session_id: str) -> BaseChatMessageHistory:
+            # Simple in-memory conversation store keyed by session id.
             if session_id not in self._history_store:
                 self._history_store[session_id] = InMemoryChatMessageHistory()
             return self._history_store[session_id]

@@ -277,6 +277,11 @@ class ChatInterface {
       // Extract title from the source object
       const title = source.title || source.collection || `Source ${index + 1}`;
 
+      // Add data-title attribute for tooltip (only if title is long)
+      if (title.length > 40) {
+        sourceItem.setAttribute('data-title', title);
+      }
+
       sourceItem.innerHTML = `
         <span class="source-number">${index + 1}</span>
         <span class="source-title">${this.escapeHtml(title)}</span>
