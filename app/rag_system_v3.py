@@ -133,17 +133,27 @@ class RAGSystem:
             headers={"Authorization": f"Bearer {OLLAMA_API_KEY}"},
         )
 
-        self.prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "You are a helpful assistant. Use the provided context to answer concisely and cite facts from it. "
-                    "If the answer is not in the context, say you don't know.",
-                ),
-                MessagesPlaceholder("history"),
-                ("human", "Question: {question}\n\nContext:\n{context}"),
-            ]
-        )
+        # self.prompt = ChatPromptTemplate.from_messages(
+        #     [
+        #         (
+        #             "system",
+        #             "You are a helpful assistant. Use the provided context to answer concisely and cite facts from it. "
+        #             "If the answer is not in the context, say you don't know.",
+        #         ),
+        #         MessagesPlaceholder("history"),
+        #         ("human", "Question: {question}\n\nContext:\n{context}"),
+        #     ]
+        # )
+        self.prompt = ChatPromptTemplate.from_messages([
+            ("system", 
+            "You are a knowledgeable archivist assistant specializing in Max Fink's life and work. "
+            "Answer questions using the provided archival documents. "
+            "Be precise, scholarly, and cite specific details from the context. "
+            "If information is not in the documents, say so clearly. "
+            "When discussing dates, events, or people, be specific and reference the source material."),
+            MessagesPlaceholder("history"),
+            ("human", "Question: {question}\n\nArchival Context:\n{context}"),
+        ])
 
         self._history_store: Dict[str, InMemoryChatMessageHistory] = {}
         self._answer_chain = self.prompt | self.llm | StrOutputParser()
@@ -205,13 +215,19 @@ class RAGSystem:
 
         # Build a lightweight metadata list to return
         sources = []
+        base_url = "https://exhibits.library.stonybrook.edu/mfp/files/original/"
+
         for d in top_docs:
             md = d.metadata or {}
+            # Build URL from base_url and pdf_filename
+            pdf_filename = md.get("pdf_filename") or md.get("filename")
+            source_url = base_url + pdf_filename if pdf_filename else (md.get("item_url") or md.get("Source") or md.get("source"))
+
             sources.append(
                 {
                     "parent_id": md.get("parent_id"),
                     "title": md.get("Title") or md.get("title"),
-                    "source": md.get("item_url") or md.get("Source") or md.get("source"),
+                    "source": source_url,
                     "collection": md.get("collection"),
                 }
             )

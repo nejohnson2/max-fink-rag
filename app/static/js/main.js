@@ -11,6 +11,11 @@ class ChatInterface {
     this.fileInput = document.getElementById('fileInput');
     this.fileLabel = document.querySelector('.file-input-label span');
     
+    // Markdown rendering (expects `marked` to be available globally)
+    this.markdown = window.marked;
+    // Optional sanitization if DOMPurify is available globally
+    this.sanitizer = window.DOMPurify;
+
     this.initEventListeners();
   }
 
@@ -151,12 +156,12 @@ class ChatInterface {
       }
 
       const result = await response.json();
-      
+
       // Remove typing indicator
       this.removeTypingIndicator(typingId);
-      
-      // Add bot response
-      this.addMessage('bot', result.answer);
+
+      // Add bot response with sources
+      this.addMessage('bot', result.answer, result.sources);
 
     } catch (error) {
       console.error('Query error:', error);
@@ -169,27 +174,126 @@ class ChatInterface {
     }
   }
 
-  addMessage(type, content) {
+  renderMarkdown(content) {
+    // Fallback to plain text if a markdown parser is not available
+    if (!this.markdown || typeof this.markdown.parse !== 'function') {
+      const escaped = document.createElement('div');
+      escaped.textContent = content;
+      return escaped.innerHTML;
+    }
+
+    // Render markdown to HTML
+    let html = this.markdown.parse(content, {
+      gfm: true,
+      breaks: true,
+    });
+
+    // Sanitize if available (recommended for any user-provided content)
+    if (this.sanitizer && typeof this.sanitizer.sanitize === 'function') {
+      html = this.sanitizer.sanitize(html, {
+        USE_PROFILES: { html: true },
+      });
+    }
+
+    return html;
+  }
+
+  postProcessMessageEl(messageContentEl) {
+    // Make links open in a new tab
+    const links = messageContentEl.querySelectorAll('a');
+    links.forEach((a) => {
+      a.setAttribute('target', '_blank');
+      a.setAttribute('rel', 'noopener noreferrer');
+    });
+  }
+
+  addMessage(type, content, sources = null) {
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${type}-message`;
-    
+
     const avatar = document.createElement('div');
     avatar.className = 'message-avatar';
     avatar.innerHTML = type === 'user' ? '<i class="fas fa-user"></i>' : '<i class="fas fa-robot"></i>';
-    
+
     const messageContent = document.createElement('div');
     messageContent.className = 'message-content';
-    const paragraph = document.createElement('p');
-    paragraph.textContent = content;
-    messageContent.appendChild(paragraph);
-    
+    messageContent.innerHTML = this.renderMarkdown(content);
+    this.postProcessMessageEl(messageContent);
+
     messageDiv.appendChild(avatar);
     messageDiv.appendChild(messageContent);
-    
+
+    // Add sources if available
+    if (sources && sources.length > 0) {
+      const sourcesDiv = this.createSourcesElement(sources);
+      if (sourcesDiv) {
+        messageDiv.appendChild(sourcesDiv);
+      }
+    }
+
     this.chatMessages.appendChild(messageDiv);
     this.scrollToBottom();
-    
+
     return messageDiv;
+  }
+
+  createSourcesElement(sources) {
+    const sourcesContainer = document.createElement('div');
+    sourcesContainer.className = 'message-sources';
+
+    const sourcesHeader = document.createElement('div');
+    sourcesHeader.className = 'sources-header';
+    sourcesHeader.innerHTML = '<i class="fas fa-book"></i> Sources';
+    sourcesContainer.appendChild(sourcesHeader);
+
+    const sourcesList = document.createElement('div');
+    sourcesList.className = 'sources-list';
+
+    // Remove duplicates based on source URL
+    const uniqueSources = [];
+    const seenUrls = new Set();
+
+    sources.forEach(source => {
+      // The backend returns the URL in the "source" field, not nested in metadata
+      const url = source?.source;
+      if (url && !seenUrls.has(url)) {
+        seenUrls.add(url);
+        uniqueSources.push(source);
+      }
+    });
+
+    // Only create the sources section if we have valid sources
+    if (uniqueSources.length === 0) {
+      return null;
+    }
+
+    uniqueSources.forEach((source, index) => {
+      const sourceItem = document.createElement('a');
+      sourceItem.className = 'source-item';
+      sourceItem.href = source.source;
+      sourceItem.target = '_blank';
+      sourceItem.rel = 'noopener noreferrer';
+
+      // Extract title from the source object
+      const title = source.title || source.collection || `Source ${index + 1}`;
+
+      sourceItem.innerHTML = `
+        <span class="source-number">${index + 1}</span>
+        <span class="source-title">${this.escapeHtml(title)}</span>
+        <i class="fas fa-external-link-alt"></i>
+      `;
+
+      sourcesList.appendChild(sourceItem);
+    });
+
+    sourcesContainer.appendChild(sourcesList);
+    return sourcesContainer;
+  }
+
+  escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   }
 
   addTypingIndicator() {
