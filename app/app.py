@@ -1,15 +1,26 @@
 # Route to handle PDF uploads and add them to ChromaDB
 from werkzeug.utils import secure_filename
+from werkzeug.middleware.proxy_fix import ProxyFix
+
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify,send_from_directory
 import os
 from config import logger
+from pathlib import Path
 
 #from rag_system import RAGSystem
 from rag_system_v3 import RAGSystem
 
 #app = Flask(__name__)
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+app.wsgi_app = ProxyFix(app.wsgi_app, x_prefix=1, x_host=1, x_proto=1)
+# BASE_DIR = Path(__file__).resolve().parent
+# app = Flask(
+#     __name__,
+#     static_folder=str(BASE_DIR / "static"),
+#     template_folder=str(BASE_DIR / "templates"),
+# )
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # Limit upload size to 500MB
+app.config["APPLICATION_ROOT"] = "/max.fink"
 #app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
 # This works
