@@ -10,13 +10,37 @@ class ChatInterface {
     this.loadingOverlay = document.getElementById('loadingOverlay');
     this.fileInput = document.getElementById('fileInput');
     this.fileLabel = document.querySelector('.file-input-label span');
-    
+
     // Markdown rendering (expects `marked` to be available globally)
     this.markdown = window.marked;
     // Optional sanitization if DOMPurify is available globally
     this.sanitizer = window.DOMPurify;
 
+    // Session management
+    this.sessionId = this.initializeSession();
+
     this.initEventListeners();
+  }
+
+  initializeSession() {
+    // Generate unique session ID for this browser tab
+    // Using timestamp + random for uniqueness
+    const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Store in sessionStorage (cleared on tab close/refresh)
+    sessionStorage.setItem('chatSessionId', sessionId);
+
+    console.log('Session initialized:', sessionId);
+
+    // Send cleanup signal when tab closes or refreshes
+    window.addEventListener('beforeunload', () => {
+      // Use sendBeacon for reliable cleanup signal
+      const cleanupData = new FormData();
+      cleanupData.append('session_id', this.sessionId);
+      navigator.sendBeacon('/cleanup_session', cleanupData);
+    });
+
+    return sessionId;
   }
 
   initEventListeners() {
@@ -129,7 +153,7 @@ class ChatInterface {
   async handleQuery(e) {
     const formData = new FormData(e.target);
     const question = formData.get('question').trim();
-    
+
     if (!question) {
       return;
     }
@@ -137,7 +161,7 @@ class ChatInterface {
     try {
       // Add user message to chat
       this.addMessage('user', question);
-      
+
       // Clear input and disable send button
       this.questionInput.value = '';
       this.sendBtn.disabled = true;
@@ -146,9 +170,16 @@ class ChatInterface {
       // Add typing indicator
       const typingId = this.addTypingIndicator();
 
+      // Send JSON with session ID instead of FormData
       const response = await fetch('/query', {
         method: 'POST',
-        body: formData
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          question: question,
+          session_id: this.sessionId
+        })
       });
 
       if (!response.ok) {

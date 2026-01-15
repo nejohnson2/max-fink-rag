@@ -7,7 +7,8 @@ from config import logger
 #from rag_system import RAGSystem
 from rag_system_v3 import RAGSystem
 
-app = Flask(__name__)
+#app = Flask(__name__)
+app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # Limit upload size to 500MB
 #app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
@@ -22,26 +23,52 @@ def index():
 @app.route('/query', methods=['POST'])
 def query():
     """Chat interface for interacting with the RAG system"""
-    user_query = request.form.get('question', '').strip()
+    # Accept JSON instead of form data
+    data = request.get_json()
+
+    user_query = data.get('question', '').strip()
+    session_id = data.get('session_id', 'default')  # Get from client
+    excluded_parent_ids = data.get('excluded_parent_ids', [])  # Optional exclusion list
+
+    # Removing the CV document
+    #excluded_parent_ids = ["item_6794"]
+
     if not user_query:
         logger.error('Query cannot be empty')
         return jsonify({'error': 'Query cannot be empty'}), 400
 
     try:
-        #response = rag.query(user_query)
-        chat_session_id = 'nb_test_session'  # For testing, use a fixed session ID
-        answer = rag.ask(user_query, chat_session_id=chat_session_id)
-        logger.info(f'Answer: {answer}')
-        # Return only the answer and sources if present
+        answer = rag.ask(
+            user_query,
+            chat_session_id=session_id,
+            excluded_parent_ids=excluded_parent_ids if excluded_parent_ids else None
+        )
+        logger.info(f'Answer for session {session_id}: {answer.get("answer", "")[:100]}...')
+
         result = {
             'answer': answer.get('answer', ''),
             'sources': answer.get('sources', [])
         }
         return jsonify(result)
     except Exception as e:
-        logger.error(f'Error processing query: {str(e)}')
+        logger.error(f'Error processing query for session {session_id}: {str(e)}')
         return jsonify({'error': 'Error processing query'}), 500
-    
+
+@app.route('/cleanup_session', methods=['POST'])
+def cleanup_session():
+    """Clean up session history when tab closes"""
+    session_id = request.form.get('session_id')
+
+    if session_id:
+        try:
+            rag.cleanup_session(session_id)
+            logger.info(f'Cleaned up session: {session_id}')
+            return '', 204  # No content response
+        except Exception as e:
+            logger.error(f'Error cleaning up session {session_id}: {str(e)}')
+            return jsonify({'error': 'Cleanup failed'}), 500
+
+    return jsonify({'error': 'No session_id provided'}), 400
 
 if __name__ == '__main__':
     logger.info("Starting Ask the Archive RAG System")
@@ -52,8 +79,8 @@ if __name__ == '__main__':
         store_dir=STORE_DIR,
         chroma_collection="rag_collection",
         enable_bm25=True,          # can set False to simplify
-        k_recall=30,
-        k_ensemble=20,
+        k_recall=15,
+        k_ensemble=10,
         k_after_rerank=6,
     )    
 

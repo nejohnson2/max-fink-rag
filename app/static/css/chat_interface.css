@@ -388,44 +388,13 @@ body {
     white-space: nowrap;
     font-weight: 500;
     min-width: 0; /* Important for flex child truncation */
+    transition: all 0.2s ease;
 }
 
-/* Tooltip on hover to show full title */
 .source-item:hover .source-title {
     overflow: visible;
     white-space: normal;
     word-break: break-word;
-}
-
-/* Create a tooltip effect for long titles */
-.source-item:hover::after {
-    content: attr(data-title);
-    position: absolute;
-    bottom: 100%;
-    left: 50%;
-    transform: translateX(-50%);
-    background: #343a40;
-    color: white;
-    padding: 8px 12px;
-    border-radius: 6px;
-    font-size: 13px;
-    white-space: normal;
-    max-width: 300px;
-    word-break: break-word;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    margin-bottom: 8px;
-    z-index: 10;
-    pointer-events: none;
-    line-height: 1.4;
-}
-
-/* Only show tooltip if title is truncated */
-.source-item[data-title]:hover::after {
-    display: block;
-}
-
-.source-item:not([data-title])::after {
-    display: none;
 }
 
 .source-item i {

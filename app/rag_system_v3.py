@@ -53,7 +53,7 @@ except Exception:  # pragma: no cover
 #from remote_ollama import RemoteOllamaLLM
 #from config import OLLAMA_API_KEY, OLLAMA_MODEL, OLLAMA_URL
 from remote_ollama import RemoteOllamaLLM
-from config import OLLAMA_API_KEY, OLLAMA_MODEL, OLLAMA_URL, logger
+from config import OLLAMA_API_KEY, OLLAMA_MODEL, OLLAMA_URL, ENABLE_MULTI_QUERY, logger
 
 class _ParentFromChildRetriever(BaseRetriever):
     """Retriever adapter that converts child chunk hits into unique parent docs.
@@ -73,6 +73,7 @@ class _ParentFromChildRetriever(BaseRetriever):
     child_retriever: BaseRetriever
     parent_lookup: Dict[str, Document]
     collection_filter: Optional[List[str]] = None
+    excluded_parent_ids: Optional[List[str]] = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def _get_relevant_documents(self, query: str) -> List[Document]:
@@ -91,6 +92,10 @@ class _ParentFromChildRetriever(BaseRetriever):
                     doc_collection = parent_doc.metadata.get("collection")
                     if doc_collection not in self.collection_filter:
                         continue
+
+                # Apply parent ID exclusion filter if specified
+                if self.excluded_parent_ids and pid in self.excluded_parent_ids:
+                    continue
 
                 seen.add(pid)
                 parents.append(parent_doc)
@@ -111,11 +116,12 @@ class _MetadataFilterRetriever(BaseRetriever):
     child_retriever: BaseRetriever
     allowed_collections: Optional[List[str]] = None
     doc_type: Optional[str] = None
+    excluded_parent_ids: Optional[List[str]] = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def _get_relevant_documents(self, query: str) -> List[Document]:
         docs: List[Document] = self.child_retriever.invoke(query)
-        if not self.allowed_collections and not self.doc_type:
+        if not self.allowed_collections and not self.doc_type and not self.excluded_parent_ids:
             return docs
 
         filtered: List[Document] = []
@@ -127,6 +133,10 @@ class _MetadataFilterRetriever(BaseRetriever):
                     continue
             if self.doc_type:
                 if md.get("doc_type") != self.doc_type:
+                    continue
+            if self.excluded_parent_ids:
+                parent_id = md.get("parent_id")
+                if parent_id in self.excluded_parent_ids:
                     continue
             filtered.append(d)
 
@@ -343,6 +353,7 @@ Respond with ONLY ONE WORD: biographical, research, or correspondence"""
         chat_session_id: str = "default",
         *,
         doc_type: Optional[str] = None,
+        excluded_parent_ids: Optional[List[str]] = None,
     ) -> Dict[str, object]:
         """Answer a question using RAG and return answer + source metadata.
 
@@ -352,11 +363,18 @@ Respond with ONLY ONE WORD: biographical, research, or correspondence"""
 
         `doc_type` is an additional metadata filter layered on top of the
         intent-based collection filter.
+
+        `excluded_parent_ids` is a list of parent_id values to exclude from
+        retrieval. Documents with these IDs will not be returned in results.
         """
+        import time
+        t_start = time.time()
 
         # Step 1: Classify intent to determine which collections are eligible.
+        t1 = time.time()
         intent = self.classify_intent(question)
         allowed_collections = self.COLLECTION_FILTERS[intent]
+        logger.info(f"⏱️  Intent classification: {time.time() - t1:.2f}s")
 
         # Step 2: Build vector search kwargs with a metadata filter.
         search_kwargs: Dict[str, object] = {"k": self.k_recall}
@@ -365,6 +383,11 @@ Respond with ONLY ONE WORD: biographical, research, or correspondence"""
         search_kwargs["filter"] = {
             "collection": {"$in": allowed_collections}
         }
+
+        # Exclude specific parent IDs if provided
+        if excluded_parent_ids:
+            search_kwargs["filter"]["parent_id"] = {"$nin": excluded_parent_ids}
+            logger.info(f"Excluding {len(excluded_parent_ids)} parent IDs from retrieval")
 
         # If doc_type is also specified, combine filters
         if doc_type:
@@ -396,6 +419,7 @@ Respond with ONLY ONE WORD: biographical, research, or correspondence"""
                 child_retriever=ensemble_child,
                 parent_lookup=self._parent_lookup,
                 collection_filter=allowed_collections,
+                excluded_parent_ids=excluded_parent_ids,
             )
         else:
             # Still enforce collection/doc_type filters even though BM25 doesn't
@@ -404,21 +428,34 @@ Respond with ONLY ONE WORD: biographical, research, or correspondence"""
                 child_retriever=ensemble_child,
                 allowed_collections=allowed_collections,
                 doc_type=doc_type,
+                excluded_parent_ids=excluded_parent_ids,
             )
 
-        expanded_ret: BaseRetriever = MultiQueryRetriever.from_llm(
-            retriever=base_ret,
-            llm=self.llm,
-            include_original=True,
-        )
+        # Optional multi-query expansion (can be disabled via config for speed)
+        if ENABLE_MULTI_QUERY:
+            t2 = time.time()
+            expanded_ret: BaseRetriever = MultiQueryRetriever.from_llm(
+                retriever=base_ret,
+                llm=self.llm,
+                include_original=True,
+            )
+            logger.info(f"⏱️  Multi-query setup: {time.time() - t2:.2f}s")
+            logger.info("Multi-query expansion ENABLED")
+        else:
+            expanded_ret = base_ret
+            logger.info("Multi-query expansion DISABLED (using single query)")
 
+        t3 = time.time()
         compression_ret = ContextualCompressionRetriever(
             base_retriever=expanded_ret,
             base_compressor=self.compressor,
         )
 
         # Retrieval pipeline output is a list of Documents ranked by relevance.
+        # NOTE: If multi-query enabled, this calls LLM + retrieval multiple times
+        # Then runs cross-encoder reranking
         contexts = compression_ret.invoke(question)
+        logger.info(f"⏱️  Retrieval + reranking: {time.time() - t3:.2f}s")
         
         # Build context text for the LLM. Even though the compressor already
         # returns `top_n`, we defensively slice.
@@ -462,12 +499,26 @@ Respond with ONLY ONE WORD: biographical, research, or correspondence"""
             history_messages_key="history",
         )
 
+        t4 = time.time()
         answer = chain_with_memory.invoke(
             {"question": question, "context": context_text},
             config={"configurable": {"session_id": chat_session_id}},
         )
+        logger.info(f"⏱️  Answer generation: {time.time() - t4:.2f}s")
+        logger.info(f"⏱️  TOTAL query time: {time.time() - t_start:.2f}s")
 
         return {
             "answer": answer,
             "sources": sources,
         }
+
+    def cleanup_session(self, session_id: str) -> None:
+        """Remove conversation history for a specific session.
+
+        Called when a browser tab closes to free up memory.
+        """
+        if session_id in self._history_store:
+            del self._history_store[session_id]
+            logger.info(f"Session history cleared: {session_id}")
+        else:
+            logger.warning(f"Attempted to clean up non-existent session: {session_id}")
