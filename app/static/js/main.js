@@ -16,6 +16,9 @@ class ChatInterface {
     // Optional sanitization if DOMPurify is available globally
     this.sanitizer = window.DOMPurify;
 
+    // Get URL prefix from Flask config (injected in template)
+    this.urlPrefix = window.APP_CONFIG?.urlPrefix || "";
+
     // Session management
     this.sessionId = this.initializeSession();
 
@@ -37,7 +40,7 @@ class ChatInterface {
       // Use sendBeacon for reliable cleanup signal
       const cleanupData = new FormData();
       cleanupData.append('session_id', this.sessionId);
-      navigator.sendBeacon('/cleanup_session', cleanupData);
+      navigator.sendBeacon(`${this.urlPrefix}/cleanup_session`, cleanupData);
     });
 
     return sessionId;
@@ -171,7 +174,7 @@ class ChatInterface {
       const typingId = this.addTypingIndicator();
 
       // Send JSON with session ID instead of FormData
-      const response = await fetch('/query', {
+      const response = await fetch(`${this.urlPrefix}/query`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

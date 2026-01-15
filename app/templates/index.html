@@ -72,6 +72,12 @@
         <p>&copy; Stony Brook University Libraries Special Collections</p>
     </footer>
 
+    <script>
+        // Inject URL prefix from Flask config for API calls
+        window.APP_CONFIG = {
+            urlPrefix: "{{ url_prefix }}"
+        };
+    </script>
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 </body>
 </html>
