@@ -4,7 +4,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify,send_from_directory
 import os
-from config import logger, URL_PREFIX
+from config import logger, URL_PREFIX, CHAT_LOG_PATH
 from pathlib import Path
 
 from rag_system_v3 import RAGSystem
@@ -50,6 +50,22 @@ def query():
             excluded_parent_ids=excluded_parent_ids if excluded_parent_ids else None
         )
         logger.info(f'Answer for session {session_id}: {answer.get("answer", "")[:100]}...')
+
+        # Log interaction for data collection
+        metadata = answer.get('_metadata', {})
+        RAGSystem.log_interaction(
+            log_path=CHAT_LOG_PATH,
+            session_id=session_id,
+            question=user_query,
+            answer=answer.get('answer', ''),
+            sources=answer.get('sources', []),
+            intent=metadata.get('intent'),
+            retrieval_time=metadata.get('retrieval_time'),
+            answer_time=metadata.get('answer_time'),
+            total_time=metadata.get('total_time'),
+            excluded_parent_ids=metadata.get('excluded_parent_ids'),
+            num_sources=metadata.get('num_sources'),
+        )
 
         result = {
             'answer': answer.get('answer', ''),

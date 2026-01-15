@@ -18,6 +18,8 @@ import os
 import json
 import sys
 from typing import List, Dict, Optional
+from datetime import datetime, timezone
+from pathlib import Path
 
 from pydantic import ConfigDict
 
@@ -504,12 +506,25 @@ Respond with ONLY ONE WORD: biographical, research, or correspondence"""
             {"question": question, "context": context_text},
             config={"configurable": {"session_id": chat_session_id}},
         )
-        logger.info(f"⏱️  Answer generation: {time.time() - t4:.2f}s")
-        logger.info(f"⏱️  TOTAL query time: {time.time() - t_start:.2f}s")
+        answer_time = time.time() - t4
+        retrieval_time = time.time() - t3
+        total_time = time.time() - t_start
+
+        logger.info(f"⏱️  Answer generation: {answer_time:.2f}s")
+        logger.info(f"⏱️  TOTAL query time: {total_time:.2f}s")
 
         return {
             "answer": answer,
             "sources": sources,
+            # Add timing and metadata for optional logging
+            "_metadata": {
+                "intent": intent,
+                "retrieval_time": retrieval_time,
+                "answer_time": answer_time,
+                "total_time": total_time,
+                "num_sources": len(sources),
+                "excluded_parent_ids": excluded_parent_ids or [],
+            }
         }
 
     def cleanup_session(self, session_id: str) -> None:
@@ -522,3 +537,63 @@ Respond with ONLY ONE WORD: biographical, research, or correspondence"""
             logger.info(f"Session history cleared: {session_id}")
         else:
             logger.warning(f"Attempted to clean up non-existent session: {session_id}")
+
+    @staticmethod
+    def log_interaction(
+        log_path: str,
+        session_id: str,
+        question: str,
+        answer: str,
+        sources: List[Dict],
+        intent: Optional[str] = None,
+        retrieval_time: Optional[float] = None,
+        answer_time: Optional[float] = None,
+        total_time: Optional[float] = None,
+        excluded_parent_ids: Optional[List[str]] = None,
+        num_sources: Optional[int] = None,
+    ) -> None:
+        """Log a chat interaction to a JSONL file for data collection.
+
+        Each log entry is a single line JSON object containing:
+        - timestamp: ISO format datetime
+        - session_id: unique identifier for the chat session
+        - question: user's query
+        - answer: RAG system response
+        - sources: list of source documents with metadata
+        - intent: classified intent (biographical/research/correspondence)
+        - retrieval_time: seconds spent on retrieval + reranking
+        - answer_time: seconds spent generating answer
+        - total_time: total query processing time
+        - excluded_parent_ids: list of excluded document IDs (if any)
+        - num_sources: number of source documents used
+
+        This format is optimized for:
+        - Lightweight append-only writes (no file locking needed)
+        - Easy parsing with standard JSON tools
+        - Simple analysis with pandas or jq
+        """
+        # Ensure log directory exists
+        log_file = Path(log_path)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Build log entry
+        log_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "session_id": session_id,
+            "question": question,
+            "answer": answer,
+            "sources": sources,
+            "intent": intent,
+            "retrieval_time_seconds": retrieval_time,
+            "answer_time_seconds": answer_time,
+            "total_time_seconds": total_time,
+            "excluded_parent_ids": excluded_parent_ids or [],
+            "num_sources": num_sources or len(sources),
+        }
+
+        # Append as single line JSON (JSONL format)
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.error(f"Failed to log interaction: {e}")

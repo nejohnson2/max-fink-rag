@@ -99,5 +99,5 @@ chroma_db/
 chroma_rag
 fink_archive/
 */rag_store/
-
+logs/
 .DS_Store

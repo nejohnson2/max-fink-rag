@@ -16,6 +16,9 @@ ENABLE_MULTI_QUERY = os.getenv("ENABLE_MULTI_QUERY", "false").lower() in ("true"
 # Deployment configuration
 URL_PREFIX = os.getenv("URL_PREFIX", "")
 
+# Data collection configuration
+CHAT_LOG_PATH = os.getenv("CHAT_LOG_PATH", "logs/chat_interactions.jsonl")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
