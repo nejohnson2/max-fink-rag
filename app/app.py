@@ -7,7 +7,7 @@ import os
 from config import logger, URL_PREFIX, CHAT_LOG_PATH
 from pathlib import Path
 
-from rag_system_v3 import RAGSystem
+from rag_system import RAGSystem
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 

@@ -2,7 +2,7 @@
 """Performance profiling for RAG system"""
 
 import time
-from rag_system_v3 import RAGSystem
+from rag_system import RAGSystem
 from config import logger
 
 def time_it(label, func):

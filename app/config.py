@@ -28,3 +28,12 @@ logging.basicConfig(
 
 # Create logger for the application
 logger = logging.getLogger("rag_app")
+
+# Load prompts from prompts.py
+try:
+    from prompts import SYSTEM_PROMPT, INTENT_CLASSIFICATION_PROMPT
+    logger.info("Loaded system prompts from prompts.py")
+except ImportError as e:
+    logger.warning(f"Could not load prompts.py: {e}. Using default prompts.")
+    SYSTEM_PROMPT = "You are a helpful assistant."
+    INTENT_CLASSIFICATION_PROMPT = "Classify this question."

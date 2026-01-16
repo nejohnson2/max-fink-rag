@@ -162,6 +162,9 @@ class ChatInterface {
     }
 
     try {
+      // Show chat messages container
+      this.chatMessages.style.display = 'block';
+
       // Add user message to chat
       this.addMessage('user', question);
 

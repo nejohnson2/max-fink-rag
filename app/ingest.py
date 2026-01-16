@@ -164,11 +164,12 @@ def build_child_chunks(
 def ingest_jsonl(
     jsonl_path: str,
     *,
-    store_dir: str = "./rag_store",
+    store_dir: str = "./fink_archive",
     chroma_collection: str = "rag_collection",
     embeddings_model: str = "BAAI/bge-small-en-v1.5",
     child_chunk_size: int = 300,
     child_chunk_overlap: int = 40,
+    excluded_titles: Optional[List[str]] = None,
 ) -> None:
     """
     Ingest a JSONL file of records and index them into Chroma + parents.jsonl.
@@ -177,6 +178,7 @@ def ingest_jsonl(
     - For each record with non-empty markdown_text:
         * Computes stable parent_id and fingerprint.
         * Skips records that haven't changed since last run.
+        * Skips records whose title matches any excluded_titles (case-insensitive).
         * Normalizes some metadata (title, date, collection, tags, item_url).
         * Accumulates parent Documents for any new or changed records.
     - Splits parents into smaller child chunks and upserts them into Chroma.
@@ -189,6 +191,7 @@ def ingest_jsonl(
         embeddings_model: HuggingFace model name for embeddings.
         child_chunk_size: Character size of each retrieval chunk.
         child_chunk_overlap: Character overlap between consecutive chunks.
+        excluded_titles: Optional list of document titles to exclude from ingestion.
     """
     logger.info("Starting ingestion from %s", jsonl_path)
     logger.info("store_dir=%s, chroma_collection=%s", store_dir, chroma_collection)
@@ -227,7 +230,14 @@ def ingest_jsonl(
     total_lines = 0
     skipped_no_text = 0
     skipped_unchanged = 0
+    skipped_excluded = 0
     added_or_updated = 0
+
+    # Normalize excluded titles to lowercase for case-insensitive matching
+    excluded_titles_lower = []
+    if excluded_titles:
+        excluded_titles_lower = [title.lower() for title in excluded_titles]
+        logger.info("Excluding documents with titles: %s", excluded_titles)
 
     logger.info("Reading JSONL records from %s", jsonl_path)
     with open(jsonl_path, "r", encoding="utf-8") as f:
@@ -240,6 +250,13 @@ def ingest_jsonl(
 
             text = rec.get("markdown_text", "")
             if not text or not text.strip():
+                continue
+
+            # Check if this document's title should be excluded
+            title = rec.get("Title", "")
+            if excluded_titles_lower and title and title.lower() in excluded_titles_lower:
+                skipped_excluded += 1
+                logger.debug("Skipping excluded document: %s", title)
                 continue
 
             pid = stable_parent_id(rec)
@@ -277,11 +294,12 @@ def ingest_jsonl(
             }
     logger.info(
         "Finished scanning JSONL: total_lines=%d, added_or_updated=%d, "
-        "skipped_no_text=%d, skipped_unchanged=%d",
+        "skipped_no_text=%d, skipped_unchanged=%d, skipped_excluded=%d",
         total_lines,
         added_or_updated,
         skipped_no_text,
         skipped_unchanged,
+        skipped_excluded,
     )
     if not parent_docs:
         logger.info("No new or updated parent docs to ingest; nothing to do.")
@@ -315,7 +333,11 @@ def main() -> None:
     CLI entry point for ingestion.
 
     Usage:
-        python ingest.py --jsonl-path /path/to/file.jsonl --store-dir /path/to/store
+        # Basic usage (outputs to ./fink_archive by default)
+        python app/ingest.py --jsonl-path data/compiled_dataset.jsonl
+
+        # With custom output directory
+        python app/ingest.py --jsonl-path data/compiled_dataset.jsonl --store-dir ./custom_dir
     """
     parser = argparse.ArgumentParser(description="Ingest a JSONL file into Chroma + parents.jsonl")
     parser.add_argument(
@@ -325,8 +347,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--store-dir",
-        required=True,
-        help="Directory where Chroma and parents.jsonl will be written (e.g. ./fink_archive)",
+        default="./fink_archive",
+        help="Directory where Chroma and parents.jsonl will be written (default: ./fink_archive)",
     )
     parser.add_argument(
         "--collection",
@@ -341,14 +363,19 @@ def main() -> None:
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=300,
-        help="Child chunk size in characters (default: 300)",
+        default=1000,
+        help="Child chunk size in characters (default: 1000)",
     )
     parser.add_argument(
         "--chunk-overlap",
         type=int,
-        default=40,
-        help="Child chunk overlap in characters (default: 40)",
+        default=300,
+        help="Child chunk overlap in characters (default: 300)",
+    )
+    parser.add_argument(
+        "--exclude-titles",
+        nargs="*",
+        help="List of document titles to exclude from ingestion (case-insensitive)",
     )
 
     args = parser.parse_args()
@@ -360,6 +387,7 @@ def main() -> None:
         embeddings_model=args.embeddings_model,
         child_chunk_size=args.chunk_size,
         child_chunk_overlap=args.chunk_overlap,
+        excluded_titles=args.exclude_titles,
     )
 
 if __name__ == "__main__":

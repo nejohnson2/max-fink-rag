@@ -94,10 +94,18 @@ celerybeat-schedule
 # Pyre type checker
 .pyre/
 
-# ChromaDB vector store
+# ChromaDB vector store and data directories
 chroma_db/
-chroma_rag
+chroma_rag/
 fink_archive/
 */rag_store/
+
+# Application logs
 logs/
+*.log
+
+# macOS
 .DS_Store
+
+# Archive folder (optional - remove this line if you want to commit archive)
+archive/
