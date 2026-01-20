@@ -14,9 +14,7 @@ except Exception:  # pragma: no cover
 
 #from langchain.schema import Document
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-#from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import MarkdownTextSplitter
 
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -128,14 +126,17 @@ def write_parent_store(path: str, store: Dict[str, Dict[str, Any]]) -> None:
 
 def build_child_chunks(
     parent_docs: List[Document],
-    child_splitter: RecursiveCharacterTextSplitter,
+    child_splitter: MarkdownTextSplitter,
 ) -> Tuple[List[str], List[str], List[Dict[str, Any]]]:
     """
     Split each parent document into smaller "child" chunks for retrieval.
 
+    Uses MarkdownTextSplitter to respect markdown structure (headers, paragraphs,
+    lists, code blocks) when creating chunks, ensuring semantic coherence.
+
     Each child chunk gets:
       - id       = f"{parent_id}:{chunk_index}"
-      - text     = chunk text
+      - text     = chunk text (with preserved markdown syntax)
       - metadata = copy of parent metadata (including parent_id)
 
     Returns:
@@ -221,10 +222,13 @@ def ingest_jsonl(
         persist_directory=chroma_dir,
     )
 
-    child_splitter = RecursiveCharacterTextSplitter(
+    # Use MarkdownTextSplitter for markdown-aware chunking
+    # This respects markdown structure (headers, lists, code blocks, etc.)
+    child_splitter = MarkdownTextSplitter(
         chunk_size=child_chunk_size,
         chunk_overlap=child_chunk_overlap,
     )
+    logger.info("Using MarkdownTextSplitter for markdown-aware chunking")
 
     parent_docs: List[Document] = []
     total_lines = 0

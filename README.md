@@ -178,7 +178,16 @@ gunicorn -w 4 -b 0.0.0.0:5067 app.app:app
 
 ### Ingesting Documents
 
-The ingestion script processes JSONL files and creates the vector database and metadata files that the application uses. **Important:** Run the script from the project root directory (not from inside the `app/` directory) so that the output directory `./fink_archive` is created in the correct location.
+The ingestion script processes JSONL files and creates the vector database and metadata files that the application uses.
+
+**Markdown-Aware Processing:**
+The system uses `MarkdownTextSplitter` which respects markdown structure when creating chunks. This means:
+- Chunks break at natural boundaries (headers, paragraphs, lists)
+- Related content stays together (a header with its content)
+- Code blocks and tables remain intact when possible
+- Better context preservation for the LLM
+
+**Important:** Run the script from the project root directory (not from inside the `app/` directory) so that the output directory `./fink_archive` is created in the correct location.
 
 **Basic usage (recommended):**
 ```bash
@@ -294,6 +303,22 @@ Changes take effect immediately on restart (no code recompilation needed).
 - `enable_bm25`: Enable BM25 sparse retrieval (default: True)
 - `child_chunk_size`: Size of retrieval chunks in characters (default: 300)
 - `child_chunk_overlap`: Overlap between chunks (default: 40)
+
+### Text Chunking
+
+The ingestion process uses **markdown-aware text splitting** via LangChain's `MarkdownTextSplitter`. This intelligently splits documents based on markdown structure rather than just character count.
+
+**Benefits:**
+- Preserves document hierarchy (headers stay with their content)
+- Respects semantic boundaries (paragraphs, lists, code blocks)
+- Improves retrieval quality by keeping related information together
+- Better context for the LLM to understand and answer questions
+
+**How it works:**
+1. Text is split at markdown structural elements (headers, blank lines, etc.)
+2. Chunks are sized to fit within `child_chunk_size` while respecting boundaries
+3. Overlaps between chunks preserve context continuity
+4. The original markdown syntax is preserved (bold, links, etc.)
 
 ### Data Directory Structure
 
