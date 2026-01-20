@@ -327,7 +327,7 @@ class RAGSystem:
 
         Returns a dict of:
         - answer: str
-        - sources: list[dict] with parent_id/title/collection/source URL
+        - sources: list[dict] with parent_id/title/collection/source URL/text content
 
         `doc_type` is an additional metadata filter layered on top of the
         intent-based collection filter.
@@ -450,6 +450,7 @@ class RAGSystem:
                     "title": md.get("Title") or md.get("title"),
                     "source": source_url,
                     "collection": md.get("collection"),
+                    "text": d.page_content,  # Include the actual source text content
                 }
             )
 
@@ -524,7 +525,7 @@ class RAGSystem:
         - session_id: unique identifier for the chat session
         - question: user's query
         - answer: RAG system response
-        - sources: list of source documents with metadata
+        - sources: list of source documents with metadata and full text content
         - intent: classified intent (biographical/research/correspondence)
         - retrieval_time: seconds spent on retrieval + reranking
         - answer_time: seconds spent generating answer
