@@ -115,8 +115,8 @@ if __name__ == '__main__':
         store_dir=STORE_DIR,
         chroma_collection="rag_collection",
         enable_bm25=True,          # can set False to simplify
-        k_recall=40,
-        k_ensemble=20,
+        k_recall=30,
+        k_ensemble=10,
         k_after_rerank=6,
     )
 
