@@ -361,25 +361,82 @@ class ChatInterface {
     const typingDiv = document.createElement('div');
     typingDiv.className = 'message bot-message typing-indicator';
     typingDiv.id = 'typing-indicator';
-    
+
     const avatar = document.createElement('div');
     avatar.className = 'message-avatar';
     avatar.innerHTML = '<i class="fas fa-robot"></i>';
-    
+
     const messageContent = document.createElement('div');
     messageContent.className = 'message-content';
-    messageContent.innerHTML = '<p><i class="fas fa-ellipsis-h fa-pulse"></i> Thinking...</p>';
-    
+    messageContent.innerHTML = '<p><i class="fas fa-ellipsis-h fa-pulse"></i> <span class="thinking-text">Thinking</span></p>';
+
     typingDiv.appendChild(avatar);
     typingDiv.appendChild(messageContent);
-    
+
     this.chatMessages.appendChild(typingDiv);
     this.scrollToBottom();
-    
+
+    // Cycle through different thinking messages (randomly selected)
+    const thinkingMessages = [
+      'Thinking',
+      'Searching the archive',
+      'Reading documents',
+      'Analyzing sources',
+      'Exploring materials',
+      'Cross-referencing',
+      'Finding connections',
+      'Gathering context',
+      'Reviewing records',
+      'Consulting the collection',
+      'Scanning manuscripts',
+      'Examining correspondence',
+      'Sifting through papers',
+      'Locating references',
+      'Piecing together history',
+      'Delving into the stacks',
+      'Uncovering details',
+      'Tracing the narrative',
+      'Studying the evidence',
+      'Compiling findings'
+    ];
+
+    const thinkingTextEl = messageContent.querySelector('.thinking-text');
+
+    // Track which messages have been shown to avoid immediate repeats
+    let shownMessages = new Set(['Thinking']); // Start with 'Thinking' already shown
+
+    // Store interval ID so we can clear it later
+    this.thinkingInterval = setInterval(() => {
+      // Reset shown messages if we've shown most of them
+      if (shownMessages.size >= thinkingMessages.length - 1) {
+        shownMessages = new Set();
+      }
+
+      // Pick a random message that hasn't been shown recently
+      let randomIndex;
+      let newMessage;
+      do {
+        randomIndex = Math.floor(Math.random() * thinkingMessages.length);
+        newMessage = thinkingMessages[randomIndex];
+      } while (shownMessages.has(newMessage));
+
+      shownMessages.add(newMessage);
+
+      if (thinkingTextEl) {
+        thinkingTextEl.textContent = newMessage;
+      }
+    }, 4000);
+
     return typingDiv.id;
   }
 
   removeTypingIndicator(id = 'typing-indicator') {
+    // Clear the cycling interval
+    if (this.thinkingInterval) {
+      clearInterval(this.thinkingInterval);
+      this.thinkingInterval = null;
+    }
+
     const typingIndicator = document.getElementById(id);
     if (typingIndicator) {
       typingIndicator.remove();

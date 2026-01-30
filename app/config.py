@@ -12,7 +12,6 @@ OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 
 # RAG system configuration
 ENABLE_MULTI_QUERY = os.getenv("ENABLE_MULTI_QUERY", "false").lower() in ("true", "1", "yes")
-ENABLE_INTENT_CLASSIFICATION = os.getenv("ENABLE_INTENT_CLASSIFICATION", "true").lower() in ("true", "1", "yes")
 ENABLE_PARENT_CHILD = os.getenv("ENABLE_PARENT_CHILD", "true").lower() in ("true", "1", "yes")
 DEBUG_RETRIEVAL = os.getenv("DEBUG_RETRIEVAL", "false").lower() in ("true", "1", "yes")
 
@@ -53,7 +52,6 @@ def print_debug_config():
     logger.info("-" * 40)
     logger.info("RAG System Configuration:")
     logger.info("  ENABLE_MULTI_QUERY: %s", ENABLE_MULTI_QUERY)
-    logger.info("  ENABLE_INTENT_CLASSIFICATION: %s", ENABLE_INTENT_CLASSIFICATION)
     logger.info("  ENABLE_PARENT_CHILD: %s", ENABLE_PARENT_CHILD)
     logger.info("  DEBUG_RETRIEVAL: %s", DEBUG_RETRIEVAL)
     logger.info("-" * 40)
@@ -64,9 +62,5 @@ def print_debug_config():
     logger.info("System Prompt (%d chars):", len(SYSTEM_PROMPT))
     # Print system prompt with indentation, line by line
     for line in SYSTEM_PROMPT.split("\n"):
-        logger.info("  %s", line)
-    logger.info("-" * 40)
-    logger.info("Intent Classification Prompt (%d chars):", len(INTENT_CLASSIFICATION_PROMPT))
-    for line in INTENT_CLASSIFICATION_PROMPT.split("\n"):
         logger.info("  %s", line)
     logger.info("=" * 80)

@@ -28,17 +28,14 @@ Guidelines:
 - Write in a neutral, professional tone suitable for a library reference interaction."""
 
 # Intent classification prompt for routing queries
-# This determines what SUPPLEMENTAL collections to search alongside biographical docs
-INTENT_CLASSIFICATION_PROMPT = """Analyze this question about Max Fink and determine if it would benefit from supplemental archival materials.
-
-The biographical files (life, career, background) are ALWAYS searched. Your task is to identify if we should ALSO search:
-- research: Add if asking about scientific work, publications, studies, findings, theories, methodology
-- correspondence: Add if asking about letters, communications, exchanges with colleagues, relationships
-- none: Only biographical files are needed (purely personal/background questions)
+INTENT_CLASSIFICATION_PROMPT = """Classify the following question about Max Fink into ONE of these categories:
+- biographical: Questions about Max Fink's life, background, education, career, personal history
+- research: Questions about his scientific work, publications, studies, findings, theories
+- correspondence: Questions about letters, communications, exchanges with colleagues
 
 Question: {question}
 
-Respond with ONLY ONE WORD: research, correspondence, or none"""
+Respond with ONLY ONE WORD: biographical, research, or correspondence"""
 
 # Alternative system prompts for different use cases (optional)
 # Uncomment and modify SYSTEM_PROMPT above to use these

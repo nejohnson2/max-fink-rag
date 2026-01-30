@@ -2,26 +2,37 @@ from __future__ import annotations
 
 """Retrieval-Augmented Generation (RAG) system for the Max Fink archive.
 
-This module implements a multi-retriever architecture for searching archival
-collections with guaranteed biographical context:
+This module implements an intent-based HYBRID retrieval architecture for searching
+archival collections with guaranteed biographical context:
 
 Architecture Overview:
-    1. Intent Classification: LLM classifies query to determine supplemental needs
-    2. Multi-Retriever Execution:
-       - Biographical retriever ALWAYS runs (searches "Biographical Files")
-       - Supplemental retriever runs conditionally based on intent:
-         * 'research' → Published Works, Research Files
-         * 'correspondence' → Correspondence
-         * 'none' → biographical only
-    3. Cross-Encoder Reranking: Combined results reranked by relevance
-    4. Biographical Guarantee: At least MIN_BIOGRAPHICAL_CHUNKS in final selection
-    5. Answer Generation: LLM generates response from selected context
+    1. Intent Classification: LLM determines if query needs research/correspondence
+    2. Biographical Retrieval: ALWAYS runs with HYBRID search (Chroma + BM25)
+    3. Supplemental Retrieval: Conditionally runs with HYBRID search based on intent
+    4. Cross-Encoder Reranking: Combined results reranked by relevance
+    5. Biographical Guarantee: At least MIN_BIOGRAPHICAL_CHUNKS in final selection
+    6. Answer Generation: LLM generates response from selected context
+
+The intent classifier determines whether to ALSO search research and/or
+correspondence collections. Biographical files are ALWAYS searched to ensure
+foundational context about Max Fink is always available.
+
+Hybrid Retrieval:
+    Each retrieval step combines two complementary search strategies:
+    - Dense (Chroma): Semantic similarity using sentence embeddings
+      Good for: conceptual queries, paraphrases, related topics
+    - Sparse (BM25): Keyword matching using term frequency (TF-IDF)
+      Good for: exact names, acronyms, specific terms, rare words
+
+    Results are fused using EnsembleRetriever with Reciprocal Rank Fusion.
 
 Components:
     - Chroma vector store (semantic similarity search)
-    - Optional BM25 keyword search (lexical retrieval for exact terms)
+    - BM25 keyword search (lexical retrieval for exact terms)
+    - EnsembleRetriever (fuses dense + sparse results)
     - Cross-encoder reranking (BAAI/bge-reranker-base)
-    - Parent/child document reconstruction (optional, per intent)
+    - Parent/child document reconstruction (optional)
+    - Intent classification (routes queries to appropriate collections)
 
 The public entrypoint is `RAGSystem.ask()`, which returns an answer plus source
 metadata suitable for displaying citations/links in the UI.
@@ -72,7 +83,6 @@ from config import (
     OLLAMA_MODEL,
     OLLAMA_URL,
     ENABLE_MULTI_QUERY,
-    ENABLE_INTENT_CLASSIFICATION,
     ENABLE_PARENT_CHILD,
     DEBUG_RETRIEVAL,
     logger,
@@ -216,45 +226,48 @@ def _load_parent_lookup(parents_jsonl_path: str) -> Dict[str, Document]:
 
 
 class RAGSystem:
-    """End-to-end RAG pipeline with multi-retriever architecture.
+    """End-to-end RAG pipeline with intent-based retrieval architecture.
 
-    This system implements a two-tier retrieval strategy:
-    1. Primary (always runs): Biographical collection for foundational context
-    2. Supplemental (intent-based): Research or correspondence collections
+    This system implements an intent-driven retrieval strategy:
+    1. Intent Classification: LLM determines if query needs research/correspondence
+    2. Biographical (always runs): Core biographical collection for foundational context
+    3. Supplemental (conditional): Research and/or correspondence based on intent
 
     The pipeline ensures biographical information is always represented in the
-    final context sent to the LLM, while allowing intent classification to
-    dynamically add relevant supplemental materials.
+    final context sent to the LLM. Intent classification determines whether to
+    ALSO search research and/or correspondence collections.
 
     Pipeline Steps:
-        1. Intent Classification → determines supplemental collections
+        1. Intent Classification → determines supplemental collections to search
         2. Biographical Retrieval → always executes (k_recall chunks)
-        3. Supplemental Retrieval → executes if intent requires it
+        3. Supplemental Retrieval → conditionally executes based on intent
         4. Cross-Encoder Reranking → orders combined results by relevance
         5. Biographical Guarantee → ensures MIN_BIOGRAPHICAL_CHUNKS in top-k
         6. Answer Generation → LLM produces response from selected context
 
     Attributes:
         BIOGRAPHICAL_COLLECTION: Collection name that is always searched
-        SUPPLEMENTAL_COLLECTIONS: Mapping of intent → collection names
+        SUPPLEMENTAL_COLLECTIONS: Mapping of intent → collections to search
         MIN_BIOGRAPHICAL_CHUNKS: Minimum biographical docs in final selection
-        USE_PARENT_DOCUMENTS_BY_INTENT: Whether to expand chunks to parents
     """
 
     # ---------------------------------------------------------------------------
     # Collection Configuration
     # ---------------------------------------------------------------------------
 
-    # The biographical collection is ALWAYS searched, regardless of intent.
+    # The biographical collection is ALWAYS searched.
     # This ensures foundational context about Max Fink is always available.
     BIOGRAPHICAL_COLLECTION = "Biographical Files"
 
-    # Supplemental collections are searched based on LLM intent classification.
-    # The intent classifier returns one of these keys based on the query.
+    # Supplemental collections mapped by intent.
+    # Intent classification determines which additional collections to search.
+    # "biographical" intent: No supplemental search (biographical only)
+    # "research" intent: Also search research-related collections
+    # "correspondence" intent: Also search correspondence collection
     SUPPLEMENTAL_COLLECTIONS = {
+        "biographical": [],  # No supplemental - biographical only
         "research": ["Published Works", "Research Files and Unpublished Works"],
         "correspondence": ["Correspondence"],
-        "none": [],  # No supplemental search needed
     }
 
     # Minimum biographical chunks guaranteed in final selection after reranking.
@@ -262,16 +275,6 @@ class RAGSystem:
     # the system will replace the lowest-ranked supplemental chunks to meet
     # this minimum.
     MIN_BIOGRAPHICAL_CHUNKS = 1
-
-    # Controls whether to expand child chunks to full parent documents.
-    # Large biographical documents can exceed context limits, so we default
-    # to False for most intents. Correspondence documents are typically
-    # smaller and benefit from full context.
-    USE_PARENT_DOCUMENTS_BY_INTENT = {
-        "research": False,       # Research docs can be very large
-        "correspondence": True,  # Letters are typically short
-        "none": False,           # Biographical only, keep chunks
-    }
 
     def __init__(
         self,
@@ -302,7 +305,7 @@ class RAGSystem:
             - Parent document lookup (for chunk→parent expansion)
             - BM25 retriever (optional, for keyword matching)
             - Cross-encoder reranker (for relevance scoring)
-            - LLM connection (for intent classification and answer generation)
+            - LLM connection (for answer generation)
             - Prompt template with system instructions
         """
         self.store_dir = store_dir
@@ -385,13 +388,58 @@ class RAGSystem:
             self._print_debug_initialization()
 
     def _build_bm25_from_chroma(self) -> BM25Retriever:
-        """Build a BM25 retriever from whatever is currently stored in Chroma."""
+        """Build a BM25 retriever from whatever is currently stored in Chroma.
+
+        Also stores the document list in self._bm25_docs for creating filtered
+        BM25 retrievers in hybrid search.
+        """
         col = self.vs._collection
         data = col.get(include=["documents", "metadatas"])
         docs: List[Document] = []
         for text, md in zip(data.get("documents", []), data.get("metadatas", [])):
             docs.append(Document(page_content=text, metadata=md or {}))
-        return BM25Retriever.from_documents(docs)
+
+        # Store docs for reuse in hybrid retriever
+        self._bm25_docs = docs
+
+        bm25 = BM25Retriever.from_documents(docs)
+        # Store reference to docs on the retriever for hybrid access
+        bm25.docs = docs
+        return bm25
+
+    def classify_intent(self, question: str) -> str:
+        """Classify user question intent to determine supplemental collections.
+
+        Uses the LLM to classify the question into one of three categories:
+        - biographical: Questions about Max Fink's life, background, education, career
+        - research: Questions about his scientific work, publications, studies, theories
+        - correspondence: Questions about letters, communications with colleagues
+
+        The classification determines which SUPPLEMENTAL collections to search.
+        Biographical files are ALWAYS searched regardless of intent.
+
+        Args:
+            question: The user's question to classify
+
+        Returns:
+            Intent string: "biographical", "research", or "correspondence"
+            Defaults to "biographical" if classification fails or is unclear.
+        """
+        classification_prompt = INTENT_CLASSIFICATION_PROMPT.format(question=question)
+
+        try:
+            intent = self.llm.invoke(classification_prompt).strip().lower()
+
+            # Validate and default to biographical if unclear
+            if intent not in ["biographical", "research", "correspondence"]:
+                logger.warning(f"Unclear intent classification: {intent}, defaulting to biographical")
+                intent = "biographical"
+
+            logger.info(f"Classified intent as: {intent}")
+            return intent
+        except Exception as e:
+            logger.error(f"Intent classification failed: {e}, defaulting to biographical")
+            return "biographical"
 
     def _create_collection_retriever(
         self,
@@ -431,6 +479,76 @@ class RAGSystem:
             search_type="similarity",
             search_kwargs=search_kwargs,
         )
+
+    def _create_hybrid_retriever(
+        self,
+        collections: List[str],
+        k: int,
+        excluded_parent_ids: Optional[List[str]] = None,
+        doc_type: Optional[str] = None,
+    ) -> BaseRetriever:
+        """Create a hybrid retriever combining Chroma (dense) + BM25 (sparse).
+
+        Hybrid retrieval combines two complementary search strategies:
+        - Chroma: Semantic similarity using dense vector embeddings
+          Good for: conceptual queries, paraphrases, related topics
+        - BM25: Keyword matching using term frequency
+          Good for: exact names, acronyms, specific terms, rare words
+
+        The two retrievers are combined using EnsembleRetriever with equal
+        weights (0.5, 0.5) and Reciprocal Rank Fusion for score combination.
+
+        If BM25 is disabled (enable_bm25=False), falls back to Chroma-only.
+
+        Args:
+            collections: List of collection names to search
+            k: Number of chunks to retrieve from each retriever before fusion
+            excluded_parent_ids: Parent IDs to exclude from results
+            doc_type: Optional additional filter on doc_type metadata
+
+        Returns:
+            Either an EnsembleRetriever (hybrid) or Chroma retriever (dense-only)
+        """
+        # Create the dense (Chroma) retriever with collection filtering
+        chroma_retriever = self._create_collection_retriever(
+            collections=collections,
+            k=k,
+            excluded_parent_ids=excluded_parent_ids,
+            doc_type=doc_type,
+        )
+
+        # If BM25 is disabled, return Chroma-only
+        if not self.enable_bm25 or self.bm25 is None:
+            if DEBUG_RETRIEVAL:
+                logger.info("   Using dense-only retrieval (BM25 disabled)")
+            return chroma_retriever
+
+        # Create a filtered BM25 retriever
+        # BM25 doesn't support native metadata filtering, so we wrap it
+        # with _MetadataFilterRetriever to apply the same filters post-retrieval
+        bm25_with_k = BM25Retriever.from_documents(
+            self.bm25.docs,  # Use the same documents as the global BM25
+            k=k,
+        )
+
+        filtered_bm25 = _MetadataFilterRetriever(
+            child_retriever=bm25_with_k,
+            allowed_collections=collections,
+            doc_type=doc_type,
+            excluded_parent_ids=excluded_parent_ids,
+        )
+
+        # Combine with EnsembleRetriever using Reciprocal Rank Fusion
+        # Equal weights give both retrievers equal importance
+        hybrid_retriever = EnsembleRetriever(
+            retrievers=[chroma_retriever, filtered_bm25],
+            weights=[0.5, 0.5],
+        )
+
+        if DEBUG_RETRIEVAL:
+            logger.info("   Using hybrid retrieval (Chroma + BM25, weights=0.5/0.5)")
+
+        return hybrid_retriever
 
     def _ensure_biographical_chunk(
         self,
@@ -574,7 +692,6 @@ class RAGSystem:
         logger.info("-" * 40)
         logger.info("Feature Flags:")
         logger.info("  Multi-query expansion: %s", ENABLE_MULTI_QUERY)
-        logger.info("  Intent classification: %s", ENABLE_INTENT_CLASSIFICATION)
         logger.info("  Parent/child chunking: %s", ENABLE_PARENT_CHILD)
         logger.info("-" * 40)
         logger.info("Index Statistics:")
@@ -586,55 +703,16 @@ class RAGSystem:
             for coll_name, count in sorted(collections_found.items()):
                 logger.info("    - %s: %d chunks", coll_name, count)
         logger.info("-" * 40)
-        logger.info("Multi-Retriever Architecture:")
+        logger.info("Intent-Based Hybrid Retrieval Architecture:")
         logger.info("  Biographical collection (ALWAYS runs): %s", self.BIOGRAPHICAL_COLLECTION)
+        logger.info("  Supplemental collections (by intent): %s", self.SUPPLEMENTAL_COLLECTIONS)
         logger.info("  Min biographical chunks guaranteed: %d", self.MIN_BIOGRAPHICAL_CHUNKS)
-        logger.info("-" * 40)
-        logger.info("Supplemental Retrievers (run based on intent):")
-        for intent, collections in self.SUPPLEMENTAL_COLLECTIONS.items():
-            use_parent = self.USE_PARENT_DOCUMENTS_BY_INTENT.get(intent, True)
-            if collections:
-                logger.info("  %s → %s (use_parent=%s)", intent, collections, use_parent)
-            else:
-                logger.info("  %s → (biographical only)", intent)
+        logger.info("  Hybrid retrieval: %s", "Chroma + BM25 (ensemble)" if self.enable_bm25 else "Chroma only (dense)")
+        if self.enable_bm25:
+            logger.info("    - Dense (Chroma): Semantic similarity search")
+            logger.info("    - Sparse (BM25): Keyword/term matching")
+            logger.info("    - Fusion: Reciprocal Rank Fusion (weights=0.5/0.5)")
         logger.info("=" * 80)
-
-    def classify_intent(self, question: str) -> str:
-        """Classify which supplemental collections to search alongside biographical docs.
-
-        Uses the LLM to analyze the question and determine if supplemental
-        archival materials would help answer it. The biographical collection
-        is ALWAYS searched regardless of the classification result.
-
-        Args:
-            question: The user's query to classify
-
-        Returns:
-            One of:
-            - 'research': Search Published Works and Research Files
-            - 'correspondence': Search Correspondence collection
-            - 'none': Only search biographical files (no supplemental)
-
-        Note:
-            Falls back to 'none' if classification fails or returns invalid value.
-        """
-
-        # Load classification prompt from config (prompts.py)
-        classification_prompt = INTENT_CLASSIFICATION_PROMPT.format(question=question)
-
-        try:
-            intent = self.llm.invoke(classification_prompt).strip().lower()
-
-            # Validate and default to 'none' if unclear (just biographical)
-            if intent not in ["research", "correspondence", "none"]:
-                logger.warning(f"Unclear intent classification: {intent}, defaulting to none (biographical only)")
-                intent = "none"
-
-            logger.info(f"Supplemental intent: {intent} (biographical always included)")
-            return intent
-        except Exception as e:
-            logger.error(f"Intent classification failed: {e}, defaulting to none (biographical only)")
-            return "none"  # Default fallback - just biographical
 
     def ask(
         self,
@@ -644,12 +722,12 @@ class RAGSystem:
         doc_type: Optional[str] = None,
         excluded_parent_ids: Optional[List[str]] = None,
     ) -> Dict[str, object]:
-        """Answer a question using the multi-retriever RAG pipeline.
+        """Answer a question using the intent-based RAG pipeline.
 
         Executes the full retrieval-augmented generation pipeline:
-        1. Intent classification (if enabled) → determines supplemental collections
+        1. Intent classification → determines which supplemental collections to search
         2. Biographical retrieval → always runs, searches BIOGRAPHICAL_COLLECTION
-        3. Supplemental retrieval → runs if intent requires research/correspondence
+        3. Supplemental retrieval → conditionally runs based on intent
         4. Cross-encoder reranking → orders combined results by relevance
         5. Biographical guarantee → ensures MIN_BIOGRAPHICAL_CHUNKS in selection
         6. Answer generation → LLM generates response from selected context
@@ -669,11 +747,7 @@ class RAGSystem:
                 - source: URL to original document
                 - collection: Archive collection name
                 - text: Chunk content used in context
-            - _metadata: dict - Internal metrics (intent, timing, etc.)
-
-        Note:
-            The biographical collection is ALWAYS searched. Intent classification
-            only determines whether to ALSO search supplemental collections.
+            - _metadata: dict - Internal metrics (timing, intent, etc.)
         """
         _ = chat_session_id  # Suppress unused parameter warning
         t_start = time.time()
@@ -690,46 +764,32 @@ class RAGSystem:
             logger.info("  Excluded parent IDs: %s", excluded_parent_ids if excluded_parent_ids else "(none)")
             logger.info("-" * 40)
 
-        # Step 1: Classify intent to determine which SUPPLEMENTAL collections to search.
-        # Biographical retriever ALWAYS runs.
-        if ENABLE_INTENT_CLASSIFICATION:
-            t1 = time.time()
-            intent = self.classify_intent(question)
-            supplemental_collections = self.SUPPLEMENTAL_COLLECTIONS.get(intent, [])
-            logger.info(f"⏱️  Intent classification: {time.time() - t1:.2f}s")
-            logger.info(f"   Result: '{intent}' → supplemental={supplemental_collections}")
-        else:
-            intent = None
-            # Search all supplemental collections when intent classification is disabled
-            supplemental_collections = list(set(
-                col for cols in self.SUPPLEMENTAL_COLLECTIONS.values() for col in cols
-            ))
-            logger.info("Intent classification DISABLED - searching all supplemental collections")
-
-        # Determine whether to use parent documents or just child chunks
-        if ENABLE_PARENT_CHILD:
-            use_parent_documents = self.USE_PARENT_DOCUMENTS_BY_INTENT.get(intent, True)
-        else:
-            use_parent_documents = False
+        # Step 1: Intent classification to determine supplemental collections
+        t1 = time.time()
+        intent = self.classify_intent(question)
+        intent_time = time.time() - t1
+        supplemental_collections = self.SUPPLEMENTAL_COLLECTIONS.get(intent, [])
+        logger.info(f"⏱️  Intent classification: {intent_time:.2f}s → {intent}")
 
         if DEBUG_RETRIEVAL:
             logger.info("=" * 80)
-            logger.info("🔍 MULTI-RETRIEVER PIPELINE")
+            logger.info("🔍 INTENT-BASED HYBRID RETRIEVER PIPELINE")
             logger.info("=" * 80)
             logger.info("Configuration:")
-            logger.info("  Intent: %s", intent if intent else "(classification disabled)")
+            logger.info("  Intent: %s", intent)
             logger.info("  Biographical collection (always): %s", self.BIOGRAPHICAL_COLLECTION)
-            logger.info("  Supplemental collections: %s", supplemental_collections if supplemental_collections else "(none)")
+            logger.info("  Supplemental collections (based on intent): %s", supplemental_collections if supplemental_collections else "(none)")
             logger.info("  Min biographical chunks: %d", self.MIN_BIOGRAPHICAL_CHUNKS)
-            logger.info("  Use parent documents: %s", use_parent_documents)
+            logger.info("  Hybrid retrieval: %s", "Chroma + BM25" if self.enable_bm25 else "Chroma only")
+            logger.info("  Use parent documents: %s", ENABLE_PARENT_CHILD)
             logger.info("  Excluded parent IDs: %s", excluded_parent_ids if excluded_parent_ids else "(none)")
             logger.info("-" * 40)
 
-        # Step 2: Run BIOGRAPHICAL retriever (ALWAYS runs)
+        # Step 2: Run BIOGRAPHICAL retriever (ALWAYS runs) - HYBRID: Chroma + BM25
         t2 = time.time()
-        logger.info("📚 Step 2a: Biographical retrieval...")
+        logger.info("📚 Step 2: Biographical retrieval (hybrid)...")
 
-        bio_retriever = self._create_collection_retriever(
+        bio_retriever = self._create_hybrid_retriever(
             collections=[self.BIOGRAPHICAL_COLLECTION],
             k=self.k_recall,
             excluded_parent_ids=excluded_parent_ids,
@@ -740,14 +800,14 @@ class RAGSystem:
 
         logger.info(f"   Retrieved {len(biographical_docs)} biographical chunks ({bio_retrieval_time:.2f}s)")
 
-        # Step 3: Run SUPPLEMENTAL retrievers (based on intent)
+        # Step 3: Run SUPPLEMENTAL retriever (only if intent requires it) - HYBRID: Chroma + BM25
+        t3 = time.time()
         supplemental_docs: List[Document] = []
 
         if supplemental_collections:
-            t3 = time.time()
-            logger.info("📚 Step 2b: Supplemental retrieval (%s)...", supplemental_collections)
+            logger.info("📚 Step 3: Supplemental retrieval (hybrid) (%s)...", supplemental_collections)
 
-            supp_retriever = self._create_collection_retriever(
+            supp_retriever = self._create_hybrid_retriever(
                 collections=supplemental_collections,
                 k=self.k_recall,
                 excluded_parent_ids=excluded_parent_ids,
@@ -758,7 +818,7 @@ class RAGSystem:
 
             logger.info(f"   Retrieved {len(supplemental_docs)} supplemental chunks ({supp_retrieval_time:.2f}s)")
         else:
-            logger.info("📚 Step 2b: No supplemental retrieval (intent='none' or disabled)")
+            logger.info("📚 Step 3: Supplemental retrieval skipped (intent=%s)", intent)
 
         # Step 4: Combine all documents for reranking
         all_docs = biographical_docs + supplemental_docs
@@ -771,7 +831,7 @@ class RAGSystem:
 
         # Step 5: Cross-encoder reranking on combined results
         t4 = time.time()
-        logger.info("🔄 Step 3: Cross-encoder reranking...")
+        logger.info("🔄 Step 5: Cross-encoder reranking...")
 
         # Create a simple retriever wrapper that returns our combined docs
         class _StaticRetriever(BaseRetriever):
@@ -895,7 +955,9 @@ class RAGSystem:
             logger.info("=" * 80)
             logger.info("📋 QUERY SUMMARY")
             logger.info("=" * 80)
+            logger.info("Intent: %s", intent)
             logger.info("Timing:")
+            logger.info("  Intent classification: %.2fs", intent_time)
             logger.info("  Retrieval + reranking: %.2fs", retrieval_time)
             logger.info("  Answer generation: %.2fs", answer_time)
             logger.info("  Total: %.2fs", total_time)
@@ -918,6 +980,7 @@ class RAGSystem:
             # Add timing and metadata for optional logging
             "_metadata": {
                 "intent": intent,
+                "intent_time": intent_time,
                 "retrieval_time": retrieval_time,
                 "answer_time": answer_time,
                 "total_time": total_time,
