@@ -42,7 +42,7 @@ import os
 import json
 import sys
 import time
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Iterator, Tuple
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -87,7 +87,6 @@ from config import (
     DEBUG_RETRIEVAL,
     logger,
     SYSTEM_PROMPT,
-    INTENT_CLASSIFICATION_PROMPT,
 )
 
 class _ParentFromChildRetriever(BaseRetriever):
@@ -407,13 +406,74 @@ class RAGSystem:
         bm25.docs = docs
         return bm25
 
-    def classify_intent(self, question: str) -> str:
-        """Classify user question intent to determine supplemental collections.
+    # ---------------------------------------------------------------------------
+    # Rules-Based Intent Classification Patterns
+    # ---------------------------------------------------------------------------
+    # Each pattern list contains regex patterns (case-insensitive) that trigger
+    # the corresponding intent. Order matters: first match wins.
 
-        Uses the LLM to classify the question into one of three categories:
+    RESEARCH_PATTERNS = [
+        # Scientific work and publications
+        r"\b(research|study|studies|experiment|experiments|trial|trials)\b",
+        r"\b(publish|published|publication|publications|paper|papers|article|articles)\b",
+        r"\b(journal|journals|findings|results|data|evidence)\b",
+        r"\b(theory|theories|hypothesis|hypotheses|method|methods|methodology)\b",
+        r"\b(treatment|treatments|therapy|therapies|procedure|procedures)\b",
+        r"\b(patient|patients|clinical|clinician|medical)\b",
+        r"\b(ect|electroconvulsive|convulsive|shock\s*therapy)\b",
+        r"\b(psychiatric|psychiatry|neuroscience|neurological)\b",
+        r"\b(discovery|discoveries|contribution|contributions|breakthrough)\b",
+        r"\b(work\s+on|worked\s+on|working\s+on)\b",
+        r"\b(scientific|science|medicine|medical\s+research)\b",
+        r"\b(effectiveness|efficacy|outcome|outcomes)\b",
+        r"\b(technique|techniques|protocol|protocols)\b",
+        r"\b(book|books|textbook|textbooks|wrote|written|author|authored)\b",
+        r"\b(catatonia|melancholia|depression|schizophrenia)\b",
+    ]
+
+    CORRESPONDENCE_PATTERNS = [
+        # Letters and communications
+        r"\b(letter|letters|correspondence|corresponded)\b",
+        r"\b(wrote\s+to|written\s+to|writing\s+to)\b",
+        r"\b(communicate|communicated|communication|communications)\b",
+        r"\b(colleague|colleagues|collaborator|collaborators)\b",
+        r"\b(exchange|exchanges|exchanged)\b",
+        r"\b(relationship\s+with|connection\s+with|contact\s+with)\b",
+        r"\b(mentor|mentored|mentoring|mentorship)\b",
+        r"\b(friend|friends|friendship|friendships)\b",
+        r"\b(professional\s+relationship|working\s+relationship)\b",
+        r"\b(network|networks|networking|connections)\b",
+    ]
+
+    BIOGRAPHICAL_PATTERNS = [
+        # Life and personal history (these override if matched)
+        r"\b(born|birth|birthplace|birthday|birthdate)\b",
+        r"\b(died|death|passed\s+away|funeral|obituary)\b",
+        r"\b(childhood|grew\s+up|raised|upbringing|youth)\b",
+        r"\b(family|father|mother|parent|parents|sibling|siblings|wife|husband|spouse|children|son|daughter)\b",
+        r"\b(education|educated|school|schools|university|college|degree|graduated|graduation)\b",
+        r"\b(early\s+life|later\s+life|personal\s+life|private\s+life)\b",
+        r"\b(career|profession|job|position|worked\s+at|employed)\b",
+        r"\b(award|awards|honor|honors|recognition|recognized)\b",
+        r"\b(retired|retirement|legacy)\b",
+        r"\b(who\s+was|who\s+is|tell\s+me\s+about)\b",
+        r"\b(background|biography|life\s+story|life\s+of)\b",
+        r"\b(where\s+did\s+he|when\s+did\s+he|how\s+did\s+he)\b",
+    ]
+
+    def classify_intent(self, question: str) -> str:
+        """Classify user question intent using rules-based pattern matching.
+
+        Uses regex patterns to classify the question into one of three categories:
         - biographical: Questions about Max Fink's life, background, education, career
         - research: Questions about his scientific work, publications, studies, theories
         - correspondence: Questions about letters, communications with colleagues
+
+        Pattern matching order:
+        1. Check for correspondence patterns (most specific)
+        2. Check for research patterns
+        3. Check for biographical patterns
+        4. Default to biographical if no patterns match
 
         The classification determines which SUPPLEMENTAL collections to search.
         Biographical files are ALWAYS searched regardless of intent.
@@ -423,23 +483,43 @@ class RAGSystem:
 
         Returns:
             Intent string: "biographical", "research", or "correspondence"
-            Defaults to "biographical" if classification fails or is unclear.
+            Defaults to "biographical" if no patterns match.
         """
-        classification_prompt = INTENT_CLASSIFICATION_PROMPT.format(question=question)
+        import re
+        q_lower = question.lower()
 
-        try:
-            intent = self.llm.invoke(classification_prompt).strip().lower()
+        # Count matches for each category to handle ambiguous queries
+        correspondence_matches = sum(
+            1 for pattern in self.CORRESPONDENCE_PATTERNS
+            if re.search(pattern, q_lower, re.IGNORECASE)
+        )
+        research_matches = sum(
+            1 for pattern in self.RESEARCH_PATTERNS
+            if re.search(pattern, q_lower, re.IGNORECASE)
+        )
+        biographical_matches = sum(
+            1 for pattern in self.BIOGRAPHICAL_PATTERNS
+            if re.search(pattern, q_lower, re.IGNORECASE)
+        )
 
-            # Validate and default to biographical if unclear
-            if intent not in ["biographical", "research", "correspondence"]:
-                logger.warning(f"Unclear intent classification: {intent}, defaulting to biographical")
-                intent = "biographical"
+        if DEBUG_RETRIEVAL:
+            logger.info("Intent pattern matches: biographical=%d, research=%d, correspondence=%d",
+                       biographical_matches, research_matches, correspondence_matches)
 
-            logger.info(f"Classified intent as: {intent}")
-            return intent
-        except Exception as e:
-            logger.error(f"Intent classification failed: {e}, defaulting to biographical")
-            return "biographical"
+        # Determine intent based on match counts
+        # Correspondence is most specific, so prioritize if it has matches
+        if correspondence_matches > 0 and correspondence_matches >= research_matches:
+            intent = "correspondence"
+        elif research_matches > 0 and research_matches > biographical_matches:
+            intent = "research"
+        elif biographical_matches > 0:
+            intent = "biographical"
+        else:
+            # Default to biographical for general questions
+            intent = "biographical"
+
+        logger.info(f"Classified intent as: {intent} (rules-based)")
+        return intent
 
     def _create_collection_retriever(
         self,
@@ -988,6 +1068,154 @@ class RAGSystem:
                 "excluded_parent_ids": excluded_parent_ids or [],
             }
         }
+
+    def ask_streaming(
+        self,
+        question: str,
+        chat_session_id: str = "default",
+        *,
+        doc_type: Optional[str] = None,
+        excluded_parent_ids: Optional[List[str]] = None,
+    ) -> Iterator[Tuple[str, Optional[Dict]]]:
+        """Stream answer tokens while providing sources metadata.
+
+        Performs the full retrieval pipeline (intent classification, hybrid
+        retrieval, reranking) then streams the LLM response token-by-token.
+
+        The first yielded item contains sources metadata (type="sources").
+        Subsequent items contain answer tokens (type="token").
+        The final item contains timing metadata (type="done").
+
+        Args:
+            question: The user's query to answer
+            chat_session_id: Session identifier (kept for API compatibility)
+            doc_type: Optional metadata filter for document type
+            excluded_parent_ids: Parent IDs to exclude from retrieval results
+
+        Yields:
+            Tuples of (event_type, data) where:
+            - ("sources", {"sources": [...], "intent": "..."}) - Initial metadata
+            - ("token", {"token": "..."}) - Each token as it's generated
+            - ("done", {"_metadata": {...}}) - Final timing metadata
+        """
+        _ = chat_session_id  # Suppress unused parameter warning
+        t_start = time.time()
+        logger.info(f"⏱️  [STREAMING] Processing question: {question}")
+
+        # Step 1: Intent classification
+        t1 = time.time()
+        intent = self.classify_intent(question)
+        intent_time = time.time() - t1
+        supplemental_collections = self.SUPPLEMENTAL_COLLECTIONS.get(intent, [])
+        logger.info(f"⏱️  Intent classification: {intent_time:.2f}s → {intent}")
+
+        # Step 2: Biographical retrieval (ALWAYS runs)
+        t2 = time.time()
+        bio_retriever = self._create_hybrid_retriever(
+            collections=[self.BIOGRAPHICAL_COLLECTION],
+            k=self.k_recall,
+            excluded_parent_ids=excluded_parent_ids,
+            doc_type=doc_type,
+        )
+        biographical_docs = bio_retriever.invoke(question)
+        logger.info(f"   Retrieved {len(biographical_docs)} biographical chunks")
+
+        # Step 3: Supplemental retrieval (if needed)
+        supplemental_docs: List[Document] = []
+        if supplemental_collections:
+            supp_retriever = self._create_hybrid_retriever(
+                collections=supplemental_collections,
+                k=self.k_recall,
+                excluded_parent_ids=excluded_parent_ids,
+                doc_type=doc_type,
+            )
+            supplemental_docs = supp_retriever.invoke(question)
+            logger.info(f"   Retrieved {len(supplemental_docs)} supplemental chunks")
+
+        # Step 4: Combine and rerank
+        all_docs = biographical_docs + supplemental_docs
+
+        class _StaticRetriever(BaseRetriever):
+            docs: List[Document]
+            model_config = ConfigDict(arbitrary_types_allowed=True)
+
+            def _get_relevant_documents(self, query: str) -> List[Document]:
+                return self.docs
+
+        static_retriever = _StaticRetriever(docs=all_docs)
+        compression_ret = ContextualCompressionRetriever(
+            base_retriever=static_retriever,
+            base_compressor=self.compressor,
+        )
+        reranked_docs = compression_ret.invoke(question)
+
+        # Step 5: Ensure biographical representation
+        top_docs = self._ensure_biographical_chunk(
+            reranked_docs=reranked_docs,
+            biographical_docs=biographical_docs,
+            k_final=self.k_after_rerank,
+        )
+
+        retrieval_time = time.time() - t2
+        logger.info(f"⏱️  Retrieval + reranking: {retrieval_time:.2f}s")
+
+        # Build sources metadata
+        sources = []
+        base_url = "https://exhibits.library.stonybrook.edu/mfp/files/original/"
+        for d in top_docs:
+            md = d.metadata or {}
+            pdf_filename = md.get("pdf_filename") or md.get("filename")
+            source_url = base_url + pdf_filename if pdf_filename else (md.get("item_url") or md.get("Source") or md.get("source"))
+            sources.append({
+                "parent_id": md.get("parent_id"),
+                "title": md.get("Title") or md.get("title"),
+                "source": source_url,
+                "collection": md.get("collection"),
+                "text": d.page_content,
+            })
+
+        # Yield sources immediately so UI can display them
+        yield ("sources", {"sources": sources, "intent": intent})
+
+        # Build context and prompt for LLM
+        context_text = "\n\n---\n\n".join(d.page_content for d in top_docs)
+        prompt_messages = self.prompt.format_messages(
+            question=question,
+            context=context_text,
+        )
+        # Combine messages into a single prompt string for the LLM
+        full_prompt = "\n".join(
+            f"{msg.type}: {msg.content}" if hasattr(msg, 'type') else str(msg.content)
+            for msg in prompt_messages
+        )
+
+        # Step 6: Stream LLM response
+        t_answer = time.time()
+        full_answer = []
+
+        for token in self.llm._stream(full_prompt):
+            full_answer.append(token)
+            yield ("token", {"token": token})
+
+        answer_time = time.time() - t_answer
+        total_time = time.time() - t_start
+
+        logger.info(f"⏱️  Answer generation: {answer_time:.2f}s")
+        logger.info(f"⏱️  TOTAL query time: {total_time:.2f}s")
+
+        # Yield final metadata
+        yield ("done", {
+            "answer": "".join(full_answer),
+            "_metadata": {
+                "intent": intent,
+                "intent_time": intent_time,
+                "retrieval_time": retrieval_time,
+                "answer_time": answer_time,
+                "total_time": total_time,
+                "num_sources": len(sources),
+                "excluded_parent_ids": excluded_parent_ids or [],
+            }
+        })
 
     def cleanup_session(self, session_id: str) -> None:
         """No-op since chat history is disabled. Kept for API compatibility."""

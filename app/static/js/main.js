@@ -176,8 +176,8 @@ class ChatInterface {
       // Add typing indicator
       const typingId = this.addTypingIndicator();
 
-      // Send JSON with session ID instead of FormData
-      const response = await fetch(`${this.urlPrefix}/query`, {
+      // Use streaming endpoint
+      const response = await fetch(`${this.urlPrefix}/query_stream`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -192,13 +192,77 @@ class ChatInterface {
         throw new Error(`Query failed: ${response.statusText}`);
       }
 
-      const result = await response.json();
-
-      // Remove typing indicator
+      // Remove typing indicator and create streaming message
       this.removeTypingIndicator(typingId);
 
-      // Add bot response with sources
-      this.addMessage('bot', result.answer, result.sources);
+      // Create the bot message element for streaming
+      const messageDiv = document.createElement('div');
+      messageDiv.className = 'message bot-message';
+
+      const avatar = document.createElement('div');
+      avatar.className = 'message-avatar';
+      avatar.innerHTML = '<i class="fas fa-robot"></i>';
+
+      const messageContent = document.createElement('div');
+      messageContent.className = 'message-content';
+      messageContent.innerHTML = ''; // Start empty
+
+      messageDiv.appendChild(avatar);
+      messageDiv.appendChild(messageContent);
+      this.chatMessages.appendChild(messageDiv);
+
+      // Track sources for later
+      let sources = [];
+      let fullAnswer = '';
+
+      // Read the SSE stream
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete SSE messages
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+
+              if (data.type === 'sources') {
+                sources = data.sources || [];
+              } else if (data.type === 'token') {
+                fullAnswer += data.token;
+                // Update message content with rendered markdown
+                messageContent.innerHTML = this.renderMarkdown(fullAnswer);
+                this.postProcessMessageEl(messageContent);
+                this.scrollToBottom();
+              } else if (data.type === 'error') {
+                messageContent.innerHTML = this.renderMarkdown(`Sorry, I encountered an error: ${data.error}`);
+              }
+              // 'done' type doesn't need handling - we already have the full answer
+            } catch (parseError) {
+              console.warn('Failed to parse SSE data:', parseError);
+            }
+          }
+        }
+      }
+
+      // Add sources after streaming completes
+      if (sources && sources.length > 0) {
+        const sourcesDiv = this.createSourcesElement(sources);
+        if (sourcesDiv) {
+          messageDiv.appendChild(sourcesDiv);
+        }
+      }
+
+      this.scrollToBottom();
 
     } catch (error) {
       console.error('Query error:', error);

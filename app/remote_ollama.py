@@ -1,4 +1,4 @@
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Iterator
 from langchain_core.language_models import LLM
 from langchain_core.outputs import Generation
 from langchain_core.callbacks import CallbackManagerForLLMRun
@@ -128,6 +128,74 @@ class RemoteOllamaLLM(LLM):
 
         snippet = text[:200].replace("\n", " ")
         raise ValueError(f"Ollama returned unexpected/truncated body. Content-Type={ct} Body[:200]={snippet}")
+
+    def _stream(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+    ) -> Iterator[str]:
+        """Stream tokens from Ollama as they are generated.
+
+        Yields individual tokens/chunks as they arrive from the Ollama API.
+        This enables real-time display of the response in the UI.
+
+        Args:
+            prompt: The prompt to send to the model
+            stop: Optional list of stop sequences
+            run_manager: Optional callback manager (unused)
+
+        Yields:
+            String tokens as they are received from the API
+        """
+        _ = run_manager  # Suppress unused parameter warning
+        url = self._endpoint()
+        base_headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Accept-Encoding": "identity",
+            "Connection": "close",
+        }
+        headers = {**base_headers, **(self.headers or {})}
+
+        payload = {"model": self.model, "prompt": prompt, "stream": True}
+        if stop:
+            payload["stop"] = stop
+
+        try:
+            with requests.post(url, json=payload, headers=headers, timeout=180, stream=True) as resp:
+                resp.raise_for_status()
+                ct = (resp.headers.get("Content-Type") or "").lower()
+                if "text/html" in ct:
+                    snippet = (resp.text or "")[:200].replace("\n", " ")
+                    raise ValueError(f"Ollama base_url is not the API. Got HTML from {url}. Body[:200]={snippet}")
+
+                try:
+                    for line in resp.iter_lines(decode_unicode=True):
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                            token = None
+                            if "response" in obj:
+                                token = obj["response"]
+                            elif "message" in obj and isinstance(obj["message"], dict):
+                                token = obj["message"].get("content", "")
+
+                            if token:
+                                yield token
+
+                            if obj.get("done") is True:
+                                break
+                        except json.JSONDecodeError:
+                            continue
+                except (ChunkedEncodingError, Urllib3ProtocolError, ReadTimeout, RequestsConnectionError):
+                    # Stream ended unexpectedly, but we've yielded what we got
+                    pass
+        except (ChunkedEncodingError, Urllib3ProtocolError, ReadTimeout, RequestsConnectionError):
+            # Connection failed before streaming started
+            raise
+
     # def _call(
     #     self,
     #     prompt: str,
