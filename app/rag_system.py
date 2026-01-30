@@ -2,13 +2,26 @@ from __future__ import annotations
 
 """Retrieval-Augmented Generation (RAG) system for the Max Fink archive.
 
-This module wires together:
-- Chroma vector search (semantic retrieval)
-- Optional BM25 keyword search (lexical retrieval)
-- Parent/child document reconstruction (retrieve chunk → return full parent)
-- Multi-query expansion (LLM generates alternative queries)
-- Cross-encoder reranking / contextual compression (select best passages)
-- A chat-style prompt with conversation history
+This module implements a multi-retriever architecture for searching archival
+collections with guaranteed biographical context:
+
+Architecture Overview:
+    1. Intent Classification: LLM classifies query to determine supplemental needs
+    2. Multi-Retriever Execution:
+       - Biographical retriever ALWAYS runs (searches "Biographical Files")
+       - Supplemental retriever runs conditionally based on intent:
+         * 'research' → Published Works, Research Files
+         * 'correspondence' → Correspondence
+         * 'none' → biographical only
+    3. Cross-Encoder Reranking: Combined results reranked by relevance
+    4. Biographical Guarantee: At least MIN_BIOGRAPHICAL_CHUNKS in final selection
+    5. Answer Generation: LLM generates response from selected context
+
+Components:
+    - Chroma vector store (semantic similarity search)
+    - Optional BM25 keyword search (lexical retrieval for exact terms)
+    - Cross-encoder reranking (BAAI/bge-reranker-base)
+    - Parent/child document reconstruction (optional, per intent)
 
 The public entrypoint is `RAGSystem.ask()`, which returns an answer plus source
 metadata suitable for displaying citations/links in the UI.
@@ -65,22 +78,27 @@ from config import (
     logger,
     SYSTEM_PROMPT,
     INTENT_CLASSIFICATION_PROMPT,
-    BIOGRAPHY_CONTEXT,
 )
 
 class _ParentFromChildRetriever(BaseRetriever):
-    """Retriever adapter that converts child chunk hits into unique parent docs.
+    """Retriever adapter that expands child chunks to full parent documents.
 
-    The vector store is typically populated with *child chunks* for recall.
-    The UI/LLM, however, usually benefits from seeing the full *parent document*
-    (or larger sections). This wrapper:
+    Used when ENABLE_PARENT_CHILD is True. The vector store contains small
+    child chunks for precise semantic matching, but the LLM often benefits
+    from seeing the full parent document for better context.
 
-    1) Invokes an underlying `child_retriever`.
-    2) Reads each child's `metadata.parent_id`.
-    3) Looks up the corresponding parent `Document` in `parent_lookup`.
-    4) Optionally filters parents by `collection_filter`.
+    Process:
+    1. Invoke the underlying child_retriever to get chunk matches
+    2. Extract parent_id from each chunk's metadata
+    3. Look up full parent documents in parent_lookup dict
+    4. Deduplicate parents (multiple chunks may share a parent)
+    5. Apply collection_filter if specified
 
-    If no parents are found, it falls back to returning the original child hits.
+    Falls back to returning original child chunks if no parents found.
+
+    Note:
+        Currently used selectively based on USE_PARENT_DOCUMENTS_BY_INTENT.
+        Large documents (e.g., biographical PDFs) may exceed context limits.
     """
 
     child_retriever: BaseRetriever
@@ -116,14 +134,20 @@ class _ParentFromChildRetriever(BaseRetriever):
 
 
 class _MetadataFilterRetriever(BaseRetriever):
-    """Filter retriever results by simple metadata constraints.
+    """Post-retrieval metadata filter for non-Chroma retrievers.
 
-    This is used when we intentionally keep results as *child chunks* (e.g.
-    biographical intent) but still want to enforce the same metadata filters
-    that Chroma supports natively.
+    Chroma supports native metadata filtering, but BM25 and ensemble retrievers
+    do not. This wrapper applies the same filters after retrieval to ensure
+    consistent results across retriever types.
 
-    Note: This filter is applied *after* the wrapped retriever returns results.
-    It is primarily to keep BM25/ensemble results aligned with vector filters.
+    Filters supported:
+    - allowed_collections: Only include docs from these collections
+    - doc_type: Only include docs with this doc_type value
+    - excluded_parent_ids: Exclude docs with these parent IDs
+
+    Note:
+        Applied after retrieval, so may return fewer than k results.
+        Primarily used for BM25/ensemble alignment with Chroma filters.
     """
 
     child_retriever: BaseRetriever
@@ -157,15 +181,20 @@ class _MetadataFilterRetriever(BaseRetriever):
 
 
 def _load_parent_lookup(parents_jsonl_path: str) -> Dict[str, Document]:
-    """Load parent documents from a JSONL file into an in-memory lookup.
+    """Load parent documents from JSONL into an in-memory lookup dictionary.
 
-    Expected JSONL record shape (per line):
-    - parent_id: str
-    - text: str
-    - metadata: dict (optional)
+    Parent documents are the full original documents before chunking. They're
+    stored separately from Chroma (which only holds child chunks) to enable
+    chunk→parent expansion when needed.
 
-    This enables fast parent reconstruction during retrieval without having to
-    re-query a separate store.
+    Args:
+        parents_jsonl_path: Path to parents.jsonl file
+
+    Returns:
+        Dict mapping parent_id → Document with full text and metadata
+
+    Expected JSONL record format (one per line):
+        {"parent_id": "...", "text": "...", "metadata": {...}}
     """
     lookup: Dict[str, Document] = {}
     if not os.path.exists(parents_jsonl_path):
@@ -187,34 +216,61 @@ def _load_parent_lookup(parents_jsonl_path: str) -> Dict[str, Document]:
 
 
 class RAGSystem:
-    """End-to-end RAG pipeline: retrieval → rerank → prompt → answer.
+    """End-to-end RAG pipeline with multi-retriever architecture.
 
-    Design notes:
-    - Vector retrieval provides semantic recall; optional BM25 helps with exact
-      terms (names, acronyms, citations).
-    - Parent/child reconstruction ensures the LLM sees coherent source text.
-    - Intent classification gates retrieval to relevant archive collections.
+    This system implements a two-tier retrieval strategy:
+    1. Primary (always runs): Biographical collection for foundational context
+    2. Supplemental (intent-based): Research or correspondence collections
+
+    The pipeline ensures biographical information is always represented in the
+    final context sent to the LLM, while allowing intent classification to
+    dynamically add relevant supplemental materials.
+
+    Pipeline Steps:
+        1. Intent Classification → determines supplemental collections
+        2. Biographical Retrieval → always executes (k_recall chunks)
+        3. Supplemental Retrieval → executes if intent requires it
+        4. Cross-Encoder Reranking → orders combined results by relevance
+        5. Biographical Guarantee → ensures MIN_BIOGRAPHICAL_CHUNKS in top-k
+        6. Answer Generation → LLM produces response from selected context
+
+    Attributes:
+        BIOGRAPHICAL_COLLECTION: Collection name that is always searched
+        SUPPLEMENTAL_COLLECTIONS: Mapping of intent → collection names
+        MIN_BIOGRAPHICAL_CHUNKS: Minimum biographical docs in final selection
+        USE_PARENT_DOCUMENTS_BY_INTENT: Whether to expand chunks to parents
     """
 
-    # Collection definitions for multi-retriever architecture
-    # Biographical is ALWAYS searched; supplemental collections are added based on intent
+    # ---------------------------------------------------------------------------
+    # Collection Configuration
+    # ---------------------------------------------------------------------------
+
+    # The biographical collection is ALWAYS searched, regardless of intent.
+    # This ensures foundational context about Max Fink is always available.
     BIOGRAPHICAL_COLLECTION = "Biographical Files"
 
+    # Supplemental collections are searched based on LLM intent classification.
+    # The intent classifier returns one of these keys based on the query.
     SUPPLEMENTAL_COLLECTIONS = {
         "research": ["Published Works", "Research Files and Unpublished Works"],
         "correspondence": ["Correspondence"],
-        "none": [],  # No supplemental collections needed
+        "none": [],  # No supplemental search needed
     }
 
-    # Minimum number of biographical chunks guaranteed in final selection
+    # Minimum biographical chunks guaranteed in final selection after reranking.
+    # If cross-encoder ranks all biographical chunks below this threshold,
+    # the system will replace the lowest-ranked supplemental chunks to meet
+    # this minimum.
     MIN_BIOGRAPHICAL_CHUNKS = 1
 
-    # Parent docs can be extremely large for some collections (e.g. long
-    # biographical PDFs). For those intents, default to sending chunk text.
+    # Controls whether to expand child chunks to full parent documents.
+    # Large biographical documents can exceed context limits, so we default
+    # to False for most intents. Correspondence documents are typically
+    # smaller and benefit from full context.
     USE_PARENT_DOCUMENTS_BY_INTENT = {
-        "research": False,
-        "correspondence": True,
-        "none": False,
+        "research": False,       # Research docs can be very large
+        "correspondence": True,  # Letters are typically short
+        "none": False,           # Biographical only, keep chunks
     }
 
     def __init__(
@@ -228,7 +284,27 @@ class RAGSystem:
         k_after_rerank: int = 6,
         enable_bm25: bool = True,
     ):
-        """Initialize embeddings, vectorstore, retrievers, reranker, and LLM."""
+        """Initialize the RAG system components.
+
+        Args:
+            store_dir: Directory containing Chroma index and parents.jsonl
+            chroma_collection: Name of the Chroma collection to query
+            embeddings_model: HuggingFace model for semantic embeddings
+            reranker_model: Cross-encoder model for reranking
+            k_recall: Number of chunks to retrieve from each collection
+            k_ensemble: Number of docs for ensemble retrieval (if BM25 enabled)
+            k_after_rerank: Final number of chunks after cross-encoder reranking
+            enable_bm25: Whether to enable BM25 lexical search (for exact terms)
+
+        Initializes:
+            - Sentence-transformer embeddings for Chroma similarity search
+            - Chroma vector store connection
+            - Parent document lookup (for chunk→parent expansion)
+            - BM25 retriever (optional, for keyword matching)
+            - Cross-encoder reranker (for relevance scoring)
+            - LLM connection (for intent classification and answer generation)
+            - Prompt template with system instructions
+        """
         self.store_dir = store_dir
         self.k_recall = k_recall
         self.k_ensemble = k_ensemble
@@ -296,15 +372,10 @@ class RAGSystem:
             headers={"Authorization": f"Bearer {OLLAMA_API_KEY}"},
         )
 
-        # Prompt: system behavior + question+context (chat history disabled).
-        # Load system prompt from config (prompts.py)
-        # Biography context (from biography.md) is included as foundational knowledge
-        # Escape curly braces in biography to prevent LangChain template parsing errors
-        escaped_biography = BIOGRAPHY_CONTEXT.replace("{", "{{").replace("}", "}}") if BIOGRAPHY_CONTEXT else ""
-        biography_section = f"Background Information:\n{escaped_biography}\n\n" if escaped_biography else ""
+        # Prompt template: system instructions + question + retrieved context
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", SYSTEM_PROMPT),
-            ("human", f"Question: {{question}}\n\n{biography_section}Archival Context:\n{{context}}"),
+            ("human", "Question: {question}\n\nArchival Context:\n{context}"),
         ])
 
         self._answer_chain = self.prompt | self.llm | StrOutputParser()
@@ -329,23 +400,30 @@ class RAGSystem:
         excluded_parent_ids: Optional[List[str]] = None,
         doc_type: Optional[str] = None,
     ) -> BaseRetriever:
-        """Create a retriever for specific collections.
+        """Create a Chroma retriever filtered to specific collections.
+
+        This factory method creates retrievers for the multi-retriever pipeline.
+        Each retriever searches a subset of the archive (biographical or
+        supplemental collections) using Chroma's metadata filtering.
 
         Args:
-            collections: List of collection names to search
-            k: Number of documents to retrieve
-            excluded_parent_ids: Parent IDs to exclude from results
-            doc_type: Optional doc_type filter
+            collections: List of collection names to search (e.g., ["Biographical Files"])
+            k: Number of chunks to retrieve
+            excluded_parent_ids: Parent IDs to exclude (for follow-up queries)
+            doc_type: Optional additional filter on doc_type metadata
 
         Returns:
-            A retriever configured for the specified collections
+            A configured Chroma retriever with collection and exclusion filters
         """
+        # Build Chroma filter: collection must be in the allowed list
         search_kwargs: Dict[str, object] = {"k": k}
         search_kwargs["filter"] = {"collection": {"$in": collections}}
 
+        # Exclude specific parent IDs (useful for "tell me more" follow-ups)
         if excluded_parent_ids:
             search_kwargs["filter"]["parent_id"] = {"$nin": excluded_parent_ids}
 
+        # Optional doc_type filter (e.g., filter to only PDF documents)
         if doc_type:
             search_kwargs["filter"]["doc_type"] = doc_type
 
@@ -360,19 +438,28 @@ class RAGSystem:
         biographical_docs: List[Document],
         k_final: int,
     ) -> List[Document]:
-        """Ensure at least MIN_BIOGRAPHICAL_CHUNKS biographical chunks in final selection.
+        """Guarantee biographical representation in the final document selection.
 
-        After cross-encoder reranking, this method checks if the top k_final documents
-        include at least MIN_BIOGRAPHICAL_CHUNKS biographical chunks. If not, it inserts
-        the highest-ranked biographical chunk(s) to meet the minimum.
+        The cross-encoder reranks all documents (biographical + supplemental) by
+        relevance to the query. However, for archival questions about Max Fink,
+        we always want some biographical context. This method ensures at least
+        MIN_BIOGRAPHICAL_CHUNKS biographical documents appear in the final selection.
+
+        Algorithm:
+        1. Mark each document with is_biographical flag based on collection
+        2. Take top k_final documents from reranked results
+        3. Count biographical documents in selection
+        4. If below minimum, replace lowest-ranked supplemental docs with
+           highest-ranked biographical docs that didn't make the cut
 
         Args:
-            reranked_docs: Documents after cross-encoder reranking (ordered by relevance)
-            biographical_docs: Original biographical chunks before reranking
-            k_final: Number of documents to return
+            reranked_docs: All documents after cross-encoder reranking (ordered by score)
+            biographical_docs: Original biographical chunks (fallback candidates)
+            k_final: Target number of documents for final selection
 
         Returns:
-            Final list of k_final documents with guaranteed biographical representation
+            List of k_final documents with guaranteed MIN_BIOGRAPHICAL_CHUNKS
+            biographical representation
         """
         # Mark documents with their source type
         for doc in reranked_docs:
@@ -442,7 +529,16 @@ class RAGSystem:
         return result
 
     def _print_debug_initialization(self) -> None:
-        """Print comprehensive debug information about the RAG system structure."""
+        """Print comprehensive debug information about the RAG system structure.
+
+        Called during initialization when DEBUG_RETRIEVAL is enabled.
+        Outputs configuration details including:
+        - Model names and endpoints
+        - Retrieval parameters (k values)
+        - Feature flags (intent classification, parent/child, etc.)
+        - Index statistics (chunk counts by collection)
+        - Multi-retriever architecture configuration
+        """
         # Get Chroma collection stats
         try:
             col = self.vs._collection
@@ -480,8 +576,6 @@ class RAGSystem:
         logger.info("  Multi-query expansion: %s", ENABLE_MULTI_QUERY)
         logger.info("  Intent classification: %s", ENABLE_INTENT_CLASSIFICATION)
         logger.info("  Parent/child chunking: %s", ENABLE_PARENT_CHILD)
-        logger.info("  Biography context: %s (%d chars)",
-                   bool(BIOGRAPHY_CONTEXT), len(BIOGRAPHY_CONTEXT) if BIOGRAPHY_CONTEXT else 0)
         logger.info("-" * 40)
         logger.info("Index Statistics:")
         logger.info("  Chroma collection: %s", self._chroma_collection)
@@ -508,8 +602,21 @@ class RAGSystem:
     def classify_intent(self, question: str) -> str:
         """Classify which supplemental collections to search alongside biographical docs.
 
-        Returns one of: 'research', 'correspondence', or 'none'
-        Biographical files are ALWAYS searched regardless of intent.
+        Uses the LLM to analyze the question and determine if supplemental
+        archival materials would help answer it. The biographical collection
+        is ALWAYS searched regardless of the classification result.
+
+        Args:
+            question: The user's query to classify
+
+        Returns:
+            One of:
+            - 'research': Search Published Works and Research Files
+            - 'correspondence': Search Correspondence collection
+            - 'none': Only search biographical files (no supplemental)
+
+        Note:
+            Falls back to 'none' if classification fails or returns invalid value.
         """
 
         # Load classification prompt from config (prompts.py)
@@ -532,25 +639,41 @@ class RAGSystem:
     def ask(
         self,
         question: str,
-        chat_session_id: str = "default",  # Kept for API compatibility, but unused (history disabled)
+        chat_session_id: str = "default",
         *,
         doc_type: Optional[str] = None,
         excluded_parent_ids: Optional[List[str]] = None,
     ) -> Dict[str, object]:
-        """Answer a question using RAG and return answer + source metadata.
+        """Answer a question using the multi-retriever RAG pipeline.
 
-        Returns a dict of:
-        - answer: str
-        - sources: list[dict] with parent_id/title/collection/source URL/text content
+        Executes the full retrieval-augmented generation pipeline:
+        1. Intent classification (if enabled) → determines supplemental collections
+        2. Biographical retrieval → always runs, searches BIOGRAPHICAL_COLLECTION
+        3. Supplemental retrieval → runs if intent requires research/correspondence
+        4. Cross-encoder reranking → orders combined results by relevance
+        5. Biographical guarantee → ensures MIN_BIOGRAPHICAL_CHUNKS in selection
+        6. Answer generation → LLM generates response from selected context
 
-        `chat_session_id` is kept for API compatibility but currently unused
-        (chat history is disabled).
+        Args:
+            question: The user's query to answer
+            chat_session_id: Session identifier (kept for API compatibility, unused)
+            doc_type: Optional metadata filter for document type
+            excluded_parent_ids: Parent IDs to exclude from retrieval results
 
-        `doc_type` is an additional metadata filter layered on top of the
-        intent-based collection filter.
+        Returns:
+            Dict containing:
+            - answer: str - The generated response
+            - sources: list[dict] - Source documents with metadata:
+                - parent_id: Document identifier
+                - title: Document title
+                - source: URL to original document
+                - collection: Archive collection name
+                - text: Chunk content used in context
+            - _metadata: dict - Internal metrics (intent, timing, etc.)
 
-        `excluded_parent_ids` is a list of parent_id values to exclude from
-        retrieval. Documents with these IDs will not be returned in results.
+        Note:
+            The biographical collection is ALWAYS searched. Intent classification
+            only determines whether to ALSO search supplemental collections.
         """
         _ = chat_session_id  # Suppress unused parameter warning
         t_start = time.time()

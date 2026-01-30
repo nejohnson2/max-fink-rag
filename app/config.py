@@ -13,7 +13,6 @@ OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 # RAG system configuration
 ENABLE_MULTI_QUERY = os.getenv("ENABLE_MULTI_QUERY", "false").lower() in ("true", "1", "yes")
 ENABLE_INTENT_CLASSIFICATION = os.getenv("ENABLE_INTENT_CLASSIFICATION", "true").lower() in ("true", "1", "yes")
-ENABLE_BIOGRAPHY = os.getenv("ENABLE_BIOGRAPHY", "false").lower() in ("true", "1", "yes")
 ENABLE_PARENT_CHILD = os.getenv("ENABLE_PARENT_CHILD", "true").lower() in ("true", "1", "yes")
 DEBUG_RETRIEVAL = os.getenv("DEBUG_RETRIEVAL", "false").lower() in ("true", "1", "yes")
 
@@ -42,10 +41,6 @@ except ImportError as e:
     SYSTEM_PROMPT = "You are a helpful assistant."
     INTENT_CLASSIFICATION_PROMPT = "Classify this question."
 
-# Load biography context from biography.md (if enabled)
-# This content is included in every query to provide foundational knowledge
-from pathlib import Path
-
 def print_debug_config():
     """Print all configuration values when DEBUG_RETRIEVAL is enabled."""
     logger.info("=" * 80)
@@ -59,7 +54,6 @@ def print_debug_config():
     logger.info("RAG System Configuration:")
     logger.info("  ENABLE_MULTI_QUERY: %s", ENABLE_MULTI_QUERY)
     logger.info("  ENABLE_INTENT_CLASSIFICATION: %s", ENABLE_INTENT_CLASSIFICATION)
-    logger.info("  ENABLE_BIOGRAPHY: %s", ENABLE_BIOGRAPHY)
     logger.info("  ENABLE_PARENT_CHILD: %s", ENABLE_PARENT_CHILD)
     logger.info("  DEBUG_RETRIEVAL: %s", DEBUG_RETRIEVAL)
     logger.info("-" * 40)
@@ -76,18 +70,3 @@ def print_debug_config():
     for line in INTENT_CLASSIFICATION_PROMPT.split("\n"):
         logger.info("  %s", line)
     logger.info("=" * 80)
-
-BIOGRAPHY_PATH = Path(__file__).parent / "biography.md"
-if ENABLE_BIOGRAPHY:
-    try:
-        BIOGRAPHY_CONTEXT = BIOGRAPHY_PATH.read_text(encoding="utf-8")
-        logger.info(f"Loaded biography context from {BIOGRAPHY_PATH}")
-    except FileNotFoundError:
-        logger.warning(f"Biography file not found at {BIOGRAPHY_PATH}. No biography context will be used.")
-        BIOGRAPHY_CONTEXT = ""
-    except Exception as e:
-        logger.warning(f"Could not load biography.md: {e}. No biography context will be used.")
-        BIOGRAPHY_CONTEXT = ""
-else:
-    BIOGRAPHY_CONTEXT = ""
-    logger.info("Biography context DISABLED")
