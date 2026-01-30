@@ -192,24 +192,10 @@ class ChatInterface {
         throw new Error(`Query failed: ${response.statusText}`);
       }
 
-      // Remove typing indicator and create streaming message
-      this.removeTypingIndicator(typingId);
-
-      // Create the bot message element for streaming
-      const messageDiv = document.createElement('div');
-      messageDiv.className = 'message bot-message';
-
-      const avatar = document.createElement('div');
-      avatar.className = 'message-avatar';
-      avatar.innerHTML = '<i class="fas fa-robot"></i>';
-
-      const messageContent = document.createElement('div');
-      messageContent.className = 'message-content';
-      messageContent.innerHTML = ''; // Start empty
-
-      messageDiv.appendChild(avatar);
-      messageDiv.appendChild(messageContent);
-      this.chatMessages.appendChild(messageDiv);
+      // Keep typing indicator visible until first token arrives
+      let typingIndicatorRemoved = false;
+      let messageDiv = null;
+      let messageContent = null;
 
       // Track sources for later
       let sources = [];
@@ -238,12 +224,51 @@ class ChatInterface {
               if (data.type === 'sources') {
                 sources = data.sources || [];
               } else if (data.type === 'token') {
+                // Remove typing indicator on first token and create message element
+                if (!typingIndicatorRemoved) {
+                  this.removeTypingIndicator(typingId);
+                  typingIndicatorRemoved = true;
+
+                  // Create the bot message element for streaming
+                  messageDiv = document.createElement('div');
+                  messageDiv.className = 'message bot-message';
+
+                  const avatar = document.createElement('div');
+                  avatar.className = 'message-avatar';
+                  avatar.innerHTML = '<i class="fas fa-robot"></i>';
+
+                  messageContent = document.createElement('div');
+                  messageContent.className = 'message-content';
+
+                  messageDiv.appendChild(avatar);
+                  messageDiv.appendChild(messageContent);
+                  this.chatMessages.appendChild(messageDiv);
+                }
+
                 fullAnswer += data.token;
                 // Update message content with rendered markdown
                 messageContent.innerHTML = this.renderMarkdown(fullAnswer);
                 this.postProcessMessageEl(messageContent);
                 this.scrollToBottom();
               } else if (data.type === 'error') {
+                if (!typingIndicatorRemoved) {
+                  this.removeTypingIndicator(typingId);
+                  typingIndicatorRemoved = true;
+
+                  messageDiv = document.createElement('div');
+                  messageDiv.className = 'message bot-message';
+
+                  const avatar = document.createElement('div');
+                  avatar.className = 'message-avatar';
+                  avatar.innerHTML = '<i class="fas fa-robot"></i>';
+
+                  messageContent = document.createElement('div');
+                  messageContent.className = 'message-content';
+
+                  messageDiv.appendChild(avatar);
+                  messageDiv.appendChild(messageContent);
+                  this.chatMessages.appendChild(messageDiv);
+                }
                 messageContent.innerHTML = this.renderMarkdown(`Sorry, I encountered an error: ${data.error}`);
               }
               // 'done' type doesn't need handling - we already have the full answer
@@ -254,12 +279,17 @@ class ChatInterface {
         }
       }
 
-      // Add sources after streaming completes
-      if (sources && sources.length > 0) {
-        const sourcesDiv = this.createSourcesElement(sources);
-        if (sourcesDiv) {
-          messageDiv.appendChild(sourcesDiv);
-        }
+      // Append sources as markdown list at the bottom of the answer
+      if (sources && sources.length > 0 && messageContent) {
+        const sourcesMarkdown = this.formatSourcesAsMarkdown(sources);
+        fullAnswer += sourcesMarkdown;
+        messageContent.innerHTML = this.renderMarkdown(fullAnswer);
+        this.postProcessMessageEl(messageContent);
+      }
+
+      // Clean up typing indicator if stream ended without tokens
+      if (!typingIndicatorRemoved) {
+        this.removeTypingIndicator(typingId);
       }
 
       this.scrollToBottom();
@@ -306,6 +336,40 @@ class ChatInterface {
       a.setAttribute('target', '_blank');
       a.setAttribute('rel', 'noopener noreferrer');
     });
+  }
+
+  formatSourcesAsMarkdown(sources) {
+    // Remove duplicates based on source URL
+    const uniqueSources = [];
+    const seenUrls = new Set();
+
+    sources.forEach(source => {
+      const url = source?.source;
+      if (url && !seenUrls.has(url)) {
+        seenUrls.add(url);
+        uniqueSources.push(source);
+      }
+    });
+
+    if (uniqueSources.length === 0) {
+      return '';
+    }
+
+    // Build markdown list
+    const maxTitleLength = 50;
+    let markdown = '\n\n---\n\n**Sources:**\n';
+
+    uniqueSources.forEach((source, index) => {
+      const title = source.title || source.collection || `Source ${index + 1}`;
+      const displayTitle = title.length > maxTitleLength
+        ? title.substring(0, maxTitleLength) + '...'
+        : title;
+      const url = source.source;
+
+      markdown += `${index + 1}. [${displayTitle}](${url})\n`;
+    });
+
+    return markdown;
   }
 
   addMessage(type, content, sources = null) {
