@@ -4,7 +4,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify,send_from_directory
 import os
-from config import logger, URL_PREFIX, CHAT_LOG_PATH
+from config import logger, URL_PREFIX, CHAT_LOG_PATH, DEBUG_RETRIEVAL, print_debug_config
 from pathlib import Path
 
 from rag_system import RAGSystem
@@ -97,14 +97,34 @@ if __name__ == '__main__':
     # Initialize RAGSystem (adjust constructor as needed)
     STORE_DIR = "./fink_archive"
 
+    if DEBUG_RETRIEVAL:
+        # Print all configuration settings first
+        print_debug_config()
+        logger.info("=" * 80)
+        logger.info("DEBUG MODE: Flask Application Startup")
+        logger.info("=" * 80)
+        logger.info("Application Settings:")
+        logger.info("  Store directory: %s", os.path.abspath(STORE_DIR))
+        logger.info("  Max upload size: %d MB", app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024))
+        logger.info("  URL prefix: '%s'", URL_PREFIX if URL_PREFIX else "(empty - local mode)")
+        logger.info("  Chat log path: %s", CHAT_LOG_PATH)
+        logger.info("  Static folder: %s", app.static_folder)
+        logger.info("=" * 80)
+
     rag = RAGSystem(
         store_dir=STORE_DIR,
         chroma_collection="rag_collection",
         enable_bm25=True,          # can set False to simplify
-        k_recall=15,
-        k_ensemble=10,
+        k_recall=40,
+        k_ensemble=20,
         k_after_rerank=6,
-    )    
+    )
+
+    if DEBUG_RETRIEVAL:
+        logger.info("=" * 80)
+        logger.info("DEBUG MODE: Server Ready")
+        logger.info("  Listening on: http://0.0.0.0:5067")
+        logger.info("=" * 80)
 
     # Run the app
     app.run(debug=False, host='0.0.0.0', port=5067)

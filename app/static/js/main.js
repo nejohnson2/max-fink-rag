@@ -314,16 +314,35 @@ class ChatInterface {
       // Extract title from the source object
       const title = source.title || source.collection || `Source ${index + 1}`;
 
-      // Add data-title attribute for tooltip (only if title is long)
-      if (title.length > 40) {
-        sourceItem.setAttribute('data-title', title);
-      }
+      // Truncate display title if too long
+      const maxDisplayLength = 10;
+      const displayTitle = title.length > maxDisplayLength
+        ? title.substring(0, maxDisplayLength) + '...'
+        : title;
+
+      // Store both truncated and full title for hover expansion
+      const sourceTitleSpan = document.createElement('span');
+      sourceTitleSpan.className = 'source-title';
+      sourceTitleSpan.textContent = displayTitle;
+      sourceTitleSpan.setAttribute('data-full-title', title);
+      sourceTitleSpan.setAttribute('data-short-title', displayTitle);
 
       sourceItem.innerHTML = `
         <span class="source-number">${index + 1}</span>
-        <span class="source-title">${this.escapeHtml(title)}</span>
-        <i class="fas fa-external-link-alt"></i>
       `;
+      sourceItem.appendChild(sourceTitleSpan);
+
+      const icon = document.createElement('i');
+      icon.className = 'fas fa-external-link-alt';
+      sourceItem.appendChild(icon);
+
+      // Add hover listeners to swap title
+      sourceItem.addEventListener('mouseenter', () => {
+        sourceTitleSpan.textContent = sourceTitleSpan.getAttribute('data-full-title');
+      });
+      sourceItem.addEventListener('mouseleave', () => {
+        sourceTitleSpan.textContent = sourceTitleSpan.getAttribute('data-short-title');
+      });
 
       sourcesList.appendChild(sourceItem);
     });
