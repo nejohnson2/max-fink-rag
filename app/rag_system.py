@@ -275,6 +275,14 @@ class RAGSystem:
     # this minimum.
     MIN_BIOGRAPHICAL_CHUNKS = 1
 
+    # Ensemble weights [chroma_weight, bm25_weight] per intent.
+    # Research queries favor BM25 for specific terminology matching.
+    INTENT_WEIGHTS = {
+        "biographical": [0.5, 0.5],
+        "research": [0.25, 0.75],
+        "correspondence": [0.5, 0.5],
+    }
+
     def __init__(
         self,
         store_dir: str = "./fink_archive",
@@ -566,6 +574,7 @@ class RAGSystem:
         k: int,
         excluded_parent_ids: Optional[List[str]] = None,
         doc_type: Optional[str] = None,
+        weights: Optional[List[float]] = None,
     ) -> BaseRetriever:
         """Create a hybrid retriever combining Chroma (dense) + BM25 (sparse).
 
@@ -619,14 +628,15 @@ class RAGSystem:
         )
 
         # Combine with EnsembleRetriever using Reciprocal Rank Fusion
-        # Equal weights give both retrievers equal importance
+        ensemble_weights = weights or [0.5, 0.5]
         hybrid_retriever = EnsembleRetriever(
             retrievers=[chroma_retriever, filtered_bm25],
-            weights=[0.5, 0.5],
+            weights=ensemble_weights,
         )
 
         if DEBUG_RETRIEVAL:
-            logger.info("   Using hybrid retrieval (Chroma + BM25, weights=0.5/0.5)")
+            logger.info("   Using hybrid retrieval (Chroma + BM25, weights=%.2f/%.2f)",
+                       ensemble_weights[0], ensemble_weights[1])
 
         return hybrid_retriever
 
@@ -849,6 +859,7 @@ class RAGSystem:
         intent = self.classify_intent(question)
         intent_time = time.time() - t1
         supplemental_collections = self.SUPPLEMENTAL_COLLECTIONS.get(intent, [])
+        intent_weights = self.INTENT_WEIGHTS.get(intent, [0.5, 0.5])
         logger.info(f"⏱️  Intent classification: {intent_time:.2f}s → {intent}")
 
         if DEBUG_RETRIEVAL:
@@ -857,6 +868,7 @@ class RAGSystem:
             logger.info("=" * 80)
             logger.info("Configuration:")
             logger.info("  Intent: %s", intent)
+            logger.info("  Ensemble weights (Chroma/BM25): %.2f/%.2f", intent_weights[0], intent_weights[1])
             logger.info("  Biographical collection (always): %s", self.BIOGRAPHICAL_COLLECTION)
             logger.info("  Supplemental collections (based on intent): %s", supplemental_collections if supplemental_collections else "(none)")
             logger.info("  Min biographical chunks: %d", self.MIN_BIOGRAPHICAL_CHUNKS)
@@ -874,6 +886,7 @@ class RAGSystem:
             k=self.k_recall,
             excluded_parent_ids=excluded_parent_ids,
             doc_type=doc_type,
+            weights=intent_weights,
         )
         biographical_docs = bio_retriever.invoke(question)
         bio_retrieval_time = time.time() - t2
@@ -892,6 +905,7 @@ class RAGSystem:
                 k=self.k_recall,
                 excluded_parent_ids=excluded_parent_ids,
                 doc_type=doc_type,
+                weights=intent_weights,
             )
             supplemental_docs = supp_retriever.invoke(question)
             supp_retrieval_time = time.time() - t3
@@ -1107,6 +1121,7 @@ class RAGSystem:
         intent = self.classify_intent(question)
         intent_time = time.time() - t1
         supplemental_collections = self.SUPPLEMENTAL_COLLECTIONS.get(intent, [])
+        intent_weights = self.INTENT_WEIGHTS.get(intent, [0.5, 0.5])
         logger.info(f"⏱️  Intent classification: {intent_time:.2f}s → {intent}")
 
         # Step 2: Biographical retrieval (ALWAYS runs)
@@ -1116,6 +1131,7 @@ class RAGSystem:
             k=self.k_recall,
             excluded_parent_ids=excluded_parent_ids,
             doc_type=doc_type,
+            weights=intent_weights,
         )
         biographical_docs = bio_retriever.invoke(question)
         logger.info(f"   Retrieved {len(biographical_docs)} biographical chunks")
@@ -1128,6 +1144,7 @@ class RAGSystem:
                 k=self.k_recall,
                 excluded_parent_ids=excluded_parent_ids,
                 doc_type=doc_type,
+                weights=intent_weights,
             )
             supplemental_docs = supp_retriever.invoke(question)
             logger.info(f"   Retrieved {len(supplemental_docs)} supplemental chunks")
