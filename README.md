@@ -9,7 +9,7 @@ A Retrieval-Augmented Generation (RAG) application for exploring the Max Fink Di
 ## Features
 
 ### Core Capabilities
-- **Intent-Based Retrieval**: LLM classifies queries to determine which collections to search
+- **Intent-Based Retrieval**: Rules-based pattern matching classifies queries to determine which collections to search
   - Biographical queries: Always searches biographical files
   - Research queries: Also searches published works and research files
   - Correspondence queries: Also searches correspondence collection
@@ -440,6 +440,9 @@ max-fink-rag/
 │   │   └── images/
 │   └── templates/
 │       └── index.html         # Main chat interface
+├── notebooks/
+│   ├── 01_sample_outputs.ipynb    # Overview of logged data
+│   └── 02_session_explorer.ipynb  # Session-level exploration
 ├── scripts/
 │   └── analyze_logs.py        # Utility for analyzing chat logs
 ├── fink_archive/              # RAG data storage (gitignored)
@@ -499,6 +502,33 @@ Statistics include:
 - Intent distribution (biographical/research/correspondence)
 - Average timing metrics
 - Sources per query
+
+### Jupyter Notebooks
+
+Two notebooks in `notebooks/` provide interactive exploration of chat logs:
+
+- **`01_sample_outputs.ipynb`** - High-level overview: schema inspection, intent distribution, timing metrics, most-cited sources, activity over time
+- **`02_session_explorer.ipynb`** - Session deep dives: full conversation threads, per-session timing, source analysis, cross-session comparison, keyword search
+
+#### Syncing Logs from a Remote Server
+
+If the application is running on a remote machine, use `rsync` to copy the log file locally before opening the notebooks:
+
+```bash
+# One-time sync
+rsync -avz user@remote-host:/path/to/max-fink-rag/logs/chat_interactions.jsonl ./logs/
+
+# Subsequent syncs (only transfers new data)
+rsync -avz user@remote-host:/path/to/max-fink-rag/logs/chat_interactions.jsonl ./logs/
+
+# With a custom SSH port
+rsync -avz -e 'ssh -p 2222' user@remote-host:/path/to/max-fink-rag/logs/chat_interactions.jsonl ./logs/
+
+# Dry run to preview what will be transferred
+rsync -avzn user@remote-host:/path/to/max-fink-rag/logs/chat_interactions.jsonl ./logs/
+```
+
+Once the file is synced, open the notebooks and run from the `notebooks/` directory — they reference `../logs/chat_interactions.jsonl` by relative path.
 
 ### Adding New Features
 
