@@ -441,8 +441,9 @@ max-fink-rag/
 │   └── templates/
 │       └── index.html         # Main chat interface
 ├── notebooks/
-│   ├── 01_sample_outputs.ipynb    # Overview of logged data
-│   └── 02_session_explorer.ipynb  # Session-level exploration
+│   ├── 01_sample_outputs.ipynb        # Overview of logged data
+│   ├── 02_session_explorer.ipynb      # Session-level exploration
+│   └── 03_retrieval_relevance.ipynb   # Query-source relevance analysis
 ├── scripts/
 │   └── analyze_logs.py        # Utility for analyzing chat logs
 ├── fink_archive/              # RAG data storage (gitignored)
@@ -509,6 +510,7 @@ Two notebooks in `notebooks/` provide interactive exploration of chat logs:
 
 - **`01_sample_outputs.ipynb`** - High-level overview: schema inspection, intent distribution, timing metrics, most-cited sources, activity over time
 - **`02_session_explorer.ipynb`** - Session deep dives: full conversation threads, per-session timing, source analysis, cross-session comparison, keyword search
+- **`03_retrieval_relevance.ipynb`** - Measures how well retrieved sources relate to queries using TF-IDF similarity, semantic embedding similarity (BGE), and keyword overlap, with qualitative side-by-side inspection of the weakest and strongest retrievals
 
 #### Syncing Logs from a Remote Server
 
