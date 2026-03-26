@@ -52,15 +52,16 @@ Query → Intent Classification
 │         └────────┬─────────┘                    │
 │                  ↓                              │
 │         EnsembleRetriever                       │
-│         (RRF weights: 0.5/0.5)                  │
+│         (RRF weights: intent-dependent)          │
 └─────────────────────────────────────────────────┘
               +
 ┌─────────────────────────────────────────────────┐
 │  SUPPLEMENTAL RETRIEVAL (based on intent)       │
 │  Same hybrid structure (Chroma + BM25)          │
-│  - research → Published Works, Research Files   │
-│  - correspondence → Correspondence              │
-│  - biographical → (no supplemental)             │
+│  Weights vary by intent:                        │
+│  - biographical → 0.5/0.5 (no supplemental)    │
+│  - research → 0.25/0.75 (favors BM25)          │
+│  - correspondence → 0.5/0.5                     │
 └─────────────────────────────────────────────────┘
               ↓
       Combine all documents
@@ -87,16 +88,23 @@ class RAGSystem:
     }
     MIN_BIOGRAPHICAL_CHUNKS = 1  # Guaranteed minimum
 
+    # Ensemble weights [chroma_weight, bm25_weight] per intent
+    INTENT_WEIGHTS = {
+        "biographical": [0.5, 0.5],
+        "research": [0.25, 0.75],
+        "correspondence": [0.5, 0.5],
+    }
+
     def __init__(
         self,
         store_dir: str = "./fink_archive",
         chroma_collection: str = "rag_collection",
         embeddings_model: str = "BAAI/bge-small-en-v1.5",
         reranker_model: str = "BAAI/bge-reranker-base",
-        enable_bm25: bool = True,
-        k_recall: int = 40,
+        k_recall: int = 30,
         k_ensemble: int = 20,
         k_after_rerank: int = 6,
+        enable_bm25: bool = True,
     )
 ```
 
@@ -173,7 +181,7 @@ OLLAMA_API_KEY=your-api-key-if-needed
 
 # RAG System Configuration
 ENABLE_MULTI_QUERY=false      # Multi-query expansion (adds latency)
-ENABLE_PARENT_CHILD=false     # Return parent docs instead of chunks
+ENABLE_PARENT_CHILD=true      # Return parent docs instead of chunks
 DEBUG_RETRIEVAL=false         # Verbose logging of retrieval steps
 
 # Deployment Configuration
@@ -309,8 +317,8 @@ rag = RAGSystem(
     store_dir="./fink_archive",
     chroma_collection="rag_collection",
     enable_bm25=True,
-    k_recall=40,
-    k_ensemble=20,
+    k_recall=30,
+    k_ensemble=10,
     k_after_rerank=6,
 )
 
@@ -347,8 +355,8 @@ SYSTEM_PROMPT = ALTERNATIVE_PROMPTS["scholarly"]  # More formal tone
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `k_recall` | 40 | Documents retrieved from each collection |
-| `k_ensemble` | 20 | Documents after ensemble fusion |
+| `k_recall` | 30 | Documents retrieved from each collection |
+| `k_ensemble` | 10 | Documents after ensemble fusion |
 | `k_after_rerank` | 6 | Final documents after cross-encoder reranking |
 | `enable_bm25` | True | Enable hybrid retrieval (Chroma + BM25) |
 | `MIN_BIOGRAPHICAL_CHUNKS` | 1 | Guaranteed biographical docs in context |
@@ -361,7 +369,7 @@ SYSTEM_PROMPT = ALTERNATIVE_PROMPTS["scholarly"]  # More formal tone
 | `OLLAMA_MODEL` | - | Model name (e.g., `llama3.1:latest`) |
 | `OLLAMA_API_KEY` | - | API key for authenticated endpoints |
 | `ENABLE_MULTI_QUERY` | false | Generate query variants for better recall |
-| `ENABLE_PARENT_CHILD` | false | Return full parent documents |
+| `ENABLE_PARENT_CHILD` | true | Return full parent documents |
 | `DEBUG_RETRIEVAL` | false | Verbose retrieval logging |
 | `URL_PREFIX` | "" | URL prefix for proxy deployment |
 | `CHAT_LOG_PATH` | logs/chat_interactions.jsonl | Query log file path |
@@ -409,6 +417,31 @@ Query the RAG system.
 }
 ```
 
+### `POST /query_stream`
+
+Stream a query response using Server-Sent Events (SSE).
+
+**Request:**
+```json
+{
+  "question": "What was Max Fink's educational background?",
+  "session_id": "session_12345",
+  "excluded_parent_ids": ["item_6794"]
+}
+```
+
+**Response:** Server-Sent Events stream with three event types:
+
+```
+data: {"type": "sources", "sources": [...], "intent": "biographical"}
+
+data: {"type": "token", "token": "Max"}
+data: {"type": "token", "token": " Fink"}
+...
+
+data: {"type": "done"}
+```
+
 ### `POST /cleanup_session`
 
 Clean up session when tab closes.
@@ -432,14 +465,16 @@ max-fink-rag/
 │   ├── ingest.py              # Batch document ingestion script
 │   ├── remote_ollama.py       # Custom LLM for remote Ollama
 │   ├── test_performance.py    # Performance profiling utilities
+│   ├── biography.md           # Max Fink biography reference document
 │   ├── static/
 │   │   ├── css/
 │   │   │   └── chat_interface.css
 │   │   ├── js/
 │   │   │   └── main.js        # Frontend chat interface
-│   │   └── images/
-│   └── templates/
-│       └── index.html         # Main chat interface
+│   │   └── images/            # Banner and background images
+│   ├── templates/
+│   │   └── index.html         # Main chat interface
+│   └── uploads/               # User PDF uploads
 ├── notebooks/
 │   ├── 01_sample_outputs.ipynb        # Overview of logged data
 │   ├── 02_session_explorer.ipynb      # Session-level exploration
